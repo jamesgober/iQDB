@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Add more feature combinations as the crate grows. Keep the
+        # empty entry so the default-feature build is always covered.
+        features:
+          - ""
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --no-default-features --features "${{ matrix.features }}" --verbose
+
+      - name: Test (unit + integration + doc)
+        run: cargo test --no-default-features --features "${{ matrix.features }}" --verbose
+
+  msrv:
+    name: MSRV (1.75)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install MSRV toolchain
+        # Pin the action ref to a stable branch and pass the toolchain
+        # via `with: toolchain:`. The action's `@<ref>` only resolves
+        # against tagged refs (`stable`, `nightly`, `1.75.0`, ...) — a
+        # no-patch like `1.75` would 404. The `toolchain:` input is
+        # liberal and accepts both `1.75` and `1.75.0`.
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.75"
+      # Some transitive dependencies may ship with `edition = "2024"`
+      # in their newest patch releases, which older MSRV toolchains do
+      # not understand. Pin offenders here with a comment that names
+      # the dep tree path and the upstream MSRV-churn justification.
+      # Add `cargo update -p <crate> --precise <version>` lines as
+      # needed.
+      - name: Build with MSRV (default features)
+        run: cargo build --verbose
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Check documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps
+
+  audit:
+    name: Security audit (cargo-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install cargo-audit
+        # 0.22+ is required to parse CVSS 4.0 entries in the RustSec
+        # advisory database. 0.21 errors out on those files with
+        # `unsupported CVSS version: 4.0` and never gets to the scan.
+        run: cargo install cargo-audit --locked --version "^0.22"
+      - name: Run audit
+        run: cargo audit --deny warnings
+
+  deny:
+    name: Dependency policy (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

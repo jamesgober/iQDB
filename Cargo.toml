@@ -1,0 +1,59 @@
+[package]
+name = "iqdb"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+readme = "README.md"
+license = "Apache-2.0 OR MIT"
+
+authors = [
+    "James Gober <me@jamesgober.com>"
+]
+
+description = "Embedded vector database for Rust. Lock-free, allocation-free hot path; cross-platform similarity search."
+
+# Customize per-crate before publishing to crates.io. crates.io accepts
+# up to 5 keywords and up to 5 categories from the published taxonomy.
+keywords = ["database", "embedded", "vector", "similarity-search", "ann"]
+
+categories = ["database-implementations", "data-structures"]
+
+documentation = "https://docs.rs/iqdb"
+repository = "https://github.com/jamesgober/iqdb"
+homepage = "https://github.com/jamesgober/iqdb"
+
+# Configuration for docs.rs
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+# Add runtime dependencies here. See STUBS.md for guidance on the
+# org-default storage substrate (`storage-io`) and other shared
+# building blocks that embedded DBs in this org typically consume.
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false }
+fastrand = "2"
+
+[features]
+default = []
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.bench]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[[bench]]
+name = "scaffold"
+harness = false
+
+[[example]]
+name = "basic"
