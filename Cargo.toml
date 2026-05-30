@@ -1,6 +1,6 @@
 [package]
 name = "iqdb"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.75"
 readme = "README.md"
@@ -12,8 +12,8 @@ authors = [
 
 description = "Embedded vector database for Rust. Lock-free, allocation-free hot path; cross-platform similarity search."
 
-# Customize per-crate before publishing to crates.io. crates.io accepts
-# up to 5 keywords and up to 5 categories from the published taxonomy.
+# crates.io accepts up to 5 keywords and up to 5 categories from the
+# published taxonomy.
 keywords = ["database", "embedded", "vector", "similarity-search", "ann"]
 
 categories = ["database-implementations", "data-structures"]
@@ -22,22 +22,33 @@ documentation = "https://docs.rs/iqdb"
 repository = "https://github.com/jamesgober/iqdb"
 homepage = "https://github.com/jamesgober/iqdb"
 
-# Configuration for docs.rs
+# Configuration for docs.rs — build with all features so the gated
+# `Serialize` / `Deserialize` impls appear in the rendered docs.
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-# Add runtime dependencies here. See STUBS.md for guidance on the
-# org-default storage substrate (`storage-io`) and other shared
-# building blocks that embedded DBs in this org typically consume.
+# `serde` is opt-in; enabling the `serde` feature derives
+# `Serialize` / `Deserialize` on `Vector`, `Payload`, `PayloadValue`,
+# `RecordId`, `Record`, and `DistanceMetric`. The default build pulls
+# zero runtime dependencies.
+serde = { version = "1", optional = true, features = ["derive"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
 fastrand = "2"
+# Round-trip tests for the optional `serde` feature.
+serde_json = "1"
+# Property-based tests for distance-metric and search-ranking invariants.
+# Pinned to 1.x; the v1 line is stable on MSRV 1.75.
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 [features]
 default = []
+# Activates `serde::Serialize` / `serde::Deserialize` on the public
+# data types. Additive; the default build is unaffected.
+serde = ["dep:serde"]
 
 [profile.release]
 opt-level = 3
@@ -52,8 +63,14 @@ lto = "fat"
 codegen-units = 1
 
 [[bench]]
-name = "scaffold"
+name = "vector_ops"
 harness = false
 
 [[example]]
 name = "basic"
+
+[[example]]
+name = "in_memory_store"
+
+[[example]]
+name = "search"
