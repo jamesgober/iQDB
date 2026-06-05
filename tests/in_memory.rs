@@ -135,14 +135,13 @@ fn vector_validation_rejects_empty_and_non_finite() {
 }
 
 #[test]
-fn flush_and_open_path_still_not_implemented_in_v0_2_0() {
+fn flush_and_close_on_in_memory_are_ok_in_v0_4_0() {
+    // v0.4.0 wires `flush` and `close` to the active backend. The
+    // in-memory backend has no durable substrate, so `flush` is a
+    // no-op and returns `Ok(())` (it no longer returns
+    // `Error::NotImplemented` as it did in v0.2.0 / v0.3.0).
     let db = Iqdb::open_in_memory();
-    assert!(matches!(db.flush(), Err(Error::NotImplemented)));
-    assert!(matches!(
-        Iqdb::open("/tmp/iqdb-test"),
-        Err(Error::NotImplemented)
-    ));
-    // Closing the in-memory handle is always Ok.
+    assert!(db.flush().is_ok());
     assert!(db.close().is_ok());
 }
 

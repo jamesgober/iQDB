@@ -57,6 +57,22 @@ pub enum Error {
         right: usize,
     },
 
+    /// On-disk data was found to be corrupt during recovery.
+    ///
+    /// Surfaced by the file-backed store when the snapshot or WAL
+    /// fails an integrity check (bad magic header, unrecognised
+    /// version, CRC mismatch, truncated entry). The `reason` is a
+    /// static string identifying which check failed; the file path
+    /// is not embedded so log forwarding stays safe by default.
+    ///
+    /// Recovery behaviour: the file-backed store stops replaying at
+    /// the first corrupt entry. Records committed before the
+    /// corruption are still loaded; anything after is discarded.
+    Corrupt {
+        /// Static description of which integrity check failed.
+        reason: &'static str,
+    },
+
     /// The requested operation is not yet implemented.
     ///
     /// Used by methods whose engine path lands in a later milestone
@@ -75,6 +91,15 @@ impl Error {
     pub(crate) const fn invalid_vector(reason: &'static str) -> Self {
         Self::InvalidVector { reason }
     }
+
+    /// Construct an [`Error::Corrupt`] from a static reason string.
+    ///
+    /// Internal helper used by the codec and the file-backed store
+    /// when an integrity check fails. Kept `pub(crate)` so the surface
+    /// of constructible reasons stays inside the crate.
+    pub(crate) const fn corrupt(reason: &'static str) -> Self {
+        Self::Corrupt { reason }
+    }
 }
 
 impl fmt::Display for Error {
@@ -86,6 +111,7 @@ impl fmt::Display for Error {
             Self::DimensionMismatch { left, right } => {
                 write!(f, "iqdb: dimension mismatch (left={left}, right={right})")
             }
+            Self::Corrupt { reason } => write!(f, "iqdb: corrupt store ({reason})"),
             Self::NotImplemented => f.write_str("iqdb: not implemented"),
         }
     }
@@ -148,6 +174,14 @@ mod tests {
         assert!(msg.contains("dimension mismatch"));
         assert!(msg.contains("left=4"));
         assert!(msg.contains("right=8"));
+    }
+
+    #[test]
+    fn corrupt_display_includes_reason() {
+        let err = Error::corrupt("bad magic");
+        let msg = format!("{err}");
+        assert!(msg.contains("corrupt store"));
+        assert!(msg.contains("bad magic"));
     }
 
     #[test]

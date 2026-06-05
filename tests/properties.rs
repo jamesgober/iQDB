@@ -14,9 +14,26 @@
 //! Strategies are kept small (dim ≤ 6, store ≤ 16) so the default
 //! 256-case sweep finishes in well under a second.
 
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use iqdb::{DistanceMetric, Iqdb, Record, RecordId, Vector};
 use proptest::collection::vec as prop_vec;
 use proptest::prelude::*;
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn tempdir() -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("iqdb-prop-{nanos}-{n}"));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    dir
+}
 
 /// Finite `f32` strategy with bounded magnitude — keeps cosine /
 /// dot-product computations within `f32` precision.
@@ -203,5 +220,39 @@ proptest! {
         let ids_a: Vec<u64> = unfiltered.iter().map(|h| h.id.get()).collect();
         let ids_b: Vec<u64> = always_true.iter().map(|h| h.id.get()).collect();
         prop_assert_eq!(ids_a, ids_b);
+    }
+
+    /// Writing an arbitrary record set to a file-backed `Iqdb`,
+    /// closing, and reopening yields a store whose records compare
+    /// equal to the originals — the durable round-trip preserves both
+    /// the vector data and the set membership.
+    ///
+    /// Bounded to small sets (≤8 records, dim 4) so the default 256
+    /// proptest cases finish in under a second.
+    #[test]
+    fn persistence_round_trip_preserves_records(
+        records in prop_vec(vector_strategy(4), 0..=8),
+    ) {
+        let dir = tempdir();
+        {
+            let db = Iqdb::open(&dir).expect("open");
+            for (id, components) in records.iter().enumerate() {
+                let v = Vector::new(components.clone()).expect("finite");
+                db.upsert(Record::new(RecordId::new(id as u64), v)).expect("upsert");
+            }
+            db.close().expect("close");
+        }
+
+        let db = Iqdb::open(&dir).expect("reopen");
+        prop_assert_eq!(db.len(), records.len());
+        for (id, components) in records.iter().enumerate() {
+            let hit = db
+                .get(RecordId::new(id as u64))
+                .expect("ok")
+                .expect("present");
+            prop_assert_eq!(hit.vector().as_slice(), components.as_slice());
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

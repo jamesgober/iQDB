@@ -1,8 +1,8 @@
 [package]
 name = "iqdb"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.87"
 readme = "README.md"
 license = "Apache-2.0 OR MIT"
 
@@ -35,13 +35,20 @@ rustdoc-args = ["--cfg", "docsrs"]
 # zero runtime dependencies.
 serde = { version = "1", optional = true, features = ["derive"] }
 
+# Unix-only — used exclusively for the `fcntl(F_FULLFSYNC)` call on
+# macOS in `crate::platform::full_sync`. The bindings on every other
+# Unix platform reduce to a single `sync_all` call and do not touch
+# `libc`. On Windows, this dependency is not pulled at all.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
 fastrand = "2"
 # Round-trip tests for the optional `serde` feature.
 serde_json = "1"
 # Property-based tests for distance-metric and search-ranking invariants.
-# Pinned to 1.x; the v1 line is stable on MSRV 1.75.
+# Pinned to 1.x; the v1 line is stable on MSRV 1.87.
 proptest = { version = "1", default-features = false, features = ["std"] }
 
 [features]
@@ -74,3 +81,6 @@ name = "in_memory_store"
 
 [[example]]
 name = "search"
+
+[[example]]
+name = "persistence"

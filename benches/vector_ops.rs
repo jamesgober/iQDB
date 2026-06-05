@@ -178,11 +178,78 @@ fn bench_search(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_file_store(c: &mut Criterion) {
+    let mut group = c.benchmark_group("file_store");
+    let mut rng = fastrand::Rng::with_seed(101);
+
+    // Single-record upsert to a fresh durable DB. Each iteration
+    // opens a new directory so we measure the durable-write path
+    // without the cumulative cost of a growing WAL.
+    group.bench_function("upsert_dim128_then_flush", |b| {
+        let dim = 128;
+        let counter = std::sync::atomic::AtomicU64::new(0);
+        b.iter_batched(
+            || {
+                let id = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let dir =
+                    std::env::temp_dir().join(format!("iqdb-bench-{}-{}", std::process::id(), id));
+                let _ = std::fs::remove_dir_all(&dir);
+                let db = Iqdb::open(&dir).expect("open");
+                let components = random_vec(dim, &mut rng);
+                let vec = Vector::new(components).expect("finite");
+                (dir, db, vec, id)
+            },
+            |(dir, db, vec, id)| {
+                db.upsert(Record::new(RecordId::new(id), vec))
+                    .expect("upsert");
+                db.flush().expect("flush");
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
+    // Open-with-recovery throughput against a snapshot-only DB. Each
+    // iteration reopens the same prepared directory so the snapshot
+    // load path is what dominates the measurement.
+    group.bench_function("open_snapshot_only_1k_records_dim128", |b| {
+        let dim = 128;
+        let dir = std::env::temp_dir().join(format!(
+            "iqdb-bench-recover-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        {
+            let db = Iqdb::open(&dir).expect("open");
+            for id in 0..1_000_u64 {
+                let v = Vector::new(random_vec(dim, &mut rng)).expect("finite");
+                db.upsert(Record::new(RecordId::new(id), v))
+                    .expect("upsert");
+            }
+            db.close().expect("close"); // snapshot now contains all 1k records, WAL is empty
+        }
+
+        b.iter(|| {
+            let db = Iqdb::open(black_box(&dir)).expect("open");
+            let _ = db.len();
+        });
+
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_vector_new,
     bench_distance,
     bench_store,
     bench_search,
+    bench_file_store,
 );
 criterion_main!(benches);

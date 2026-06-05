@@ -10,19 +10,22 @@
 //! runtime. Open a handle, write vectors, query nearest neighbours —
 //! all from inside your binary.
 //!
-//! The `0.3.0` release adds **exact top-`k` similarity search** on
-//! top of the v0.2.0 primitives: [`Iqdb::search`], [`Iqdb::search_with`]
-//! (predicate-filtered), [`Iqdb::search_batch`], and
-//! [`Iqdb::search_batch_with`], all returning ordered
-//! [`SearchResult`]s. The kernel is a brute-force flat scan with a
-//! bounded top-`k` heap; approximate indices (IVF, HNSW) follow in
-//! v0.5.0 and will sit alongside the flat kernel rather than
-//! replacing it.
+//! The `0.4.0` release adds **durable file-backed storage**:
+//! [`Iqdb::open(path)`] now opens or creates a directory-backed
+//! database with a snapshot file (`<path>/snap`) and a write-ahead
+//! log (`<path>/wal`). [`Iqdb::flush`] drives the WAL through the
+//! strongest sync primitive each platform offers (`F_FULLFSYNC` on
+//! macOS, `fsync(2)` on other Unix, `FlushFileBuffers` on Windows).
+//! [`Iqdb::close`] runs a compaction — writes a fresh snapshot,
+//! atomically replaces the old one, truncates the WAL — so the next
+//! open is a single-file load with no replay. Recovery handles
+//! corrupted WAL tails by truncating to the last known-good offset.
 //!
-//! Durable file-backed storage lands in v0.4.0. Until then,
-//! [`Iqdb::open(path)`] and [`Iqdb::flush`] return
-//! [`Error::NotImplemented`] so call sites can be wired against the
-//! final API shape today.
+//! The v0.3.0 surface (CRUD, top-`k` search, filters, batch) is
+//! unchanged — every method dispatches through a `pub(crate)`
+//! `Backend` enum so the in-memory and file-backed paths share the
+//! same public API. Approximate indices (IVF, HNSW) follow in v0.5.0
+//! and will sit alongside the flat kernel rather than replacing it.
 //!
 //! Enable the optional `serde` Cargo feature to derive
 //! `Serialize` / `Deserialize` on [`Vector`], [`Payload`],
@@ -99,23 +102,23 @@
 //! # run().unwrap();
 //! ```
 //!
-//! Branch on [`Error::NotImplemented`] when wiring methods whose
-//! engine path lands in a later milestone — the `Err` arm disappears
-//! when the corresponding release ships:
+//! Open a directory-backed durable database, write a record, sync to
+//! disk, and close cleanly. The directory is created if it does not
+//! exist; the snapshot + WAL pair inside it survives process restarts:
 //!
-//! ```
-//! use iqdb::{Error, Iqdb, Result};
+//! ```no_run
+//! use iqdb::{Iqdb, Record, RecordId, Result, Vector};
 //!
-//! fn flush_if_supported(db: &Iqdb) -> Result<()> {
-//!     match db.flush() {
-//!         Ok(()) => Ok(()),
-//!         Err(Error::NotImplemented) => Ok(()),
-//!         Err(err) => Err(err),
-//!     }
+//! fn run() -> Result<()> {
+//!     let db = Iqdb::open("./data/my-db")?;
+//!     db.upsert(Record::new(
+//!         RecordId::new(1),
+//!         Vector::new(vec![0.1, 0.2, 0.3])?,
+//!     ))?;
+//!     db.flush()?; // F_FULLFSYNC on macOS, fsync on other unix, FlushFileBuffers on Windows
+//!     db.close()  // runs a final compaction: snapshot rewrite + WAL truncate
 //! }
-//!
-//! let db = Iqdb::open_in_memory();
-//! flush_if_supported(&db).unwrap();
+//! # run().unwrap();
 //! ```
 
 #![deny(warnings)]
@@ -147,9 +150,13 @@
 )]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+mod backend;
+mod codec;
 mod db;
 mod error;
+mod file_store;
 mod payload;
+mod platform;
 mod record;
 mod search;
 pub(crate) mod store;

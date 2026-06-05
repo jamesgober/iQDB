@@ -6,35 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-## [0.3.0] — 2026-05-30
+## [0.4.0] — 2026-05-30
 
 ### Added
 
-- [`Iqdb::search`](./src/db.rs) — exact top-`k` similarity search. Returns `Vec<SearchResult>` sorted ascending by `score` under the smaller-is-closer convention, with `id` as the deterministic tie-breaker. The kernel is a brute-force flat scan with a bounded top-`k` heap (`O(N · D + N · log k)` for `N` records of dimensionality `D`); approximate indices in v0.5.0 will sit alongside the flat kernel rather than replacing it.
-- [`Iqdb::search_with`](./src/db.rs) — predicate-filtered top-`k`. The `Fn(&Record) -> bool` filter is monomorphised into the search loop — no per-record dynamic dispatch. Records that fail the predicate are excluded from heap admission, so the filter composes cleanly with the distance metric.
-- [`Iqdb::search_batch`](./src/db.rs) — sequential batch search. `output[i]` is the top-`k` for `queries[i]`; input order is preserved.
-- [`Iqdb::search_batch_with`](./src/db.rs) — batch search with a shared filter applied to every query.
-- [`SearchResult`](./src/search.rs) — `{ id: RecordId, score: f32, payload: Option<Payload> }`. The payload field carries a clone of the record's metadata at search time so callers do not need a follow-up `get`. Behind the `serde` feature, derives `Serialize` / `Deserialize`.
-- Crate-internal flat-search kernel in [`src/search.rs`](./src/search.rs) — uses a bounded `BinaryHeap<HeapEntry>` with `HeapEntry { score, id }` (the payload clone is deferred until the heap settles to its `k` survivors) and a NaN-aware total order with id tie-break. `NaN` scores (from cosine against zero vectors) sort to the tail of the result list rather than corrupting the comparison chain.
-- `MemoryStore::with_records` — scoped read-lock access for the search kernel; the closure receives the underlying `HashMap` borrow and the lock is released as soon as it returns.
-- Property-based test suite at [`tests/properties.rs`](./tests/properties.rs) — 8 `proptest`-driven properties covering distance-metric algebra (identity, symmetry, L2 non-negativity, cosine in `[0, 2]`) and search-ranking invariants (length bound, ascending order, perfect-match presence, no-filter parity with always-true filter).
-- Integration test suite at [`tests/search.rs`](./tests/search.rs) — 14 tests covering the four public entry points: top-`k` ordering, `k = 0` short-circuit, `k > store.len()` cap, filter pruning, empty filter result, dimension-mismatch propagation, payload preservation, payload-absent fallback, batch input-order preservation, batch on empty store, shared filter across batch, and concurrent reader safety through `Arc<Iqdb>`.
-- Search bench group in [`benches/vector_ops.rs`](./benches/vector_ops.rs) — three variants (`flat_k10_dim128`, `flat_k10_dim128_filter_half`, `batch4_k10_dim128`) at 1 000 and 10 000 records.
-- New example [`examples/search.rs`](./examples/search.rs) — walk-through of unfiltered cosine search, payload-filtered search, and a 3-probe batch.
-- Full API reference at [`docs/API.md`](./docs/API.md) — every public type, method, error variant, and feature flag is documented with parameter descriptions and runnable examples, following the metrics-lib API.md format.
-- `proptest = "1"` dev-dependency (default-features off, `std` feature) for the property tests. Pinned to the 1.x line for MSRV 1.75 compatibility.
+- [`Iqdb::open(path)`](./src/db.rs) is now **load-bearing**. The path is treated as a directory; iqdb creates `<path>/snap` (most recent durable snapshot) and `<path>/wal` (write-ahead log) and manages both. Path validation rejects existing non-directory paths with `Error::InvalidConfig`. Missing directories are created with `create_dir_all` semantics.
+- Crate-internal `FileStore` ([`src/file_store.rs`](./src/file_store.rs)) — directory-backed durable store. Write path: encode op → append framed entry to WAL → apply to in-memory map. Read path: serve from the in-memory mirror. Recovery on open: load snapshot, replay WAL on top, truncate corrupt tail to last known-good offset. Compaction on close: write fresh snapshot, atomic-rename over old snapshot, truncate WAL.
+- Cross-platform `full_sync` primitive at [`src/platform.rs`](./src/platform.rs). macOS uses `fcntl(fd, F_FULLFSYNC, 0)` (the only platform that needs an escape hatch beyond `fsync` for true power-loss durability — SQLite and Core Data use it for the same reason). Other Unix uses `fsync(2)` via `File::sync_all`. Windows uses `FlushFileBuffers` via `File::sync_all`.
+- Binary frame codec at [`src/codec.rs`](./src/codec.rs) — length-prefixed (u32 LE) + CRC32 (IEEE 802.3) tail. Encodes upsert and delete ops over `RecordId` / `Vector` / `Payload` / `PayloadValue`. Little-endian throughout regardless of host byte order, so databases written on x86_64 read back identically on aarch64. Versioned snapshot header (4-byte magic `IQDB` + u32 LE format version) so future format changes can negotiate compatibility without silent degradation.
+- Crate-internal `Backend` enum at [`src/backend.rs`](./src/backend.rs) — `Memory(MemoryStore)` / `File(FileStore)`. Every `Iqdb` method dispatches through a hand-written match for zero dynamic-dispatch cost on the hot path. The search kernel binds to both backends through the same `with_records` shape.
+- `Error::Corrupt { reason: &'static str }` — surfaced by `Iqdb::open(path)` when the snapshot fails an integrity check (bad magic, unknown format version, truncated header). WAL corruption is handled internally (truncation to last good offset) and does not surface as an error.
+- `Iqdb::flush` and `Iqdb::close` are now load-bearing for both backends:
+  - **In-memory**: `flush` returns `Ok(())` (the in-memory map is already as durable as a memory-only backend can be); `close` drops the map.
+  - **File-backed**: `flush` runs `full_sync` on the WAL; `close` runs a full compaction (snapshot rewrite + atomic rename + WAL truncate) so the next open is a single-file load with no replay.
+- `MemoryStore::with_records` is now mirrored by `FileStore::with_records` and exposed through `Backend::with_records`, so the search kernel works identically on both backends.
+- Integration test suite at [`tests/persistence.rs`](./tests/persistence.rs) — 12 tests covering the full durable lifecycle: fresh-directory open, file-path rejection, upsert/delete round-trip across close+reopen, payload round-trip through compaction, recovery without close, recovery without flush, search against recovered data, multi-cycle state preservation, WAL truncation on close, snapshot integrity check, and silent WAL-tail truncation on corruption.
+- Property-based persistence test at [`tests/properties.rs`](./tests/properties.rs) — proves the full open → upsert → close → reopen round-trip preserves arbitrary record sets (bounded to ≤8 records, dim 4, so the default 256-case sweep finishes under a second).
+- New example [`examples/persistence.rs`](./examples/persistence.rs) — three-session walkthrough: open + upsert + close, reopen + verify + search + delete + close, reopen + confirm-delete + close. Demonstrates the full durable workflow against a single on-disk database.
+- New benchmark group `file_store` in [`benches/vector_ops.rs`](./benches/vector_ops.rs) — `upsert_dim128_then_flush` measures the durable-write path (fresh DB per iteration so the bench is not dominated by the cumulative cost of a growing WAL), `open_snapshot_only_1k_records_dim128` measures recovery throughput against a snapshot-only DB.
+- Unix-only `libc = "0.2"` runtime dependency (gated on `cfg(unix)`) — used exclusively for the macOS `fcntl(F_FULLFSYNC)` call. Windows builds pull zero runtime dependencies; Linux pulls only `libc`.
+- `serde_json` dev-dependency promoted to cover the new persistence integration tests' edge cases. (Already present from v0.2.0 for the optional `serde` feature; no production impact.)
+- Full v0.4.0 surface documented in [`docs/API.md`](./docs/API.md) — new "Durable Storage" section covering write path, durability contract, open/recover, close/compact, platform-specific sync, and on-disk format. New `Error::Corrupt` row in the error table. Persistence example linked in the Examples section.
 
 ### Changed
 
-- `examples/basic.rs` — unchanged structurally; still exercises the lifecycle + a single upsert/get round-trip.
-- Crate-level rustdoc in `src/lib.rs` — the second runnable example now demonstrates filtered top-`k` search instead of standalone distance computation, so the rustdoc surface always exercises the latest milestone.
-- README — `Quick Start` rewritten around `Iqdb::search`; `Filtered and batch search` subsection added; `API Overview` now points to `docs/API.md` as the canonical reference; benchmark and testing sections updated for the new groups and the property tests.
+- `Iqdb::flush()` no longer returns `Error::NotImplemented`. Both backends now answer `flush` meaningfully — in-memory as a no-op `Ok(())`, file-backed as `full_sync` on the WAL. The previous staged-surface doctest pattern (`match Err(Error::NotImplemented) => fallback`) is removed from the crate-level rustdoc; the v0.4.0 example shows the full durable lifecycle instead.
+- `Iqdb::open(path)` no longer returns `Error::NotImplemented`. It opens or creates a directory-backed durable database at the given path. Source-compatible with v0.3.0 callers that branched on the `NotImplemented` variant (the branch becomes dead code; no compilation break).
+- The v0.2.0 integration test `flush_and_open_path_still_not_implemented_in_v0_2_0` is renamed to `flush_and_close_on_in_memory_are_ok_in_v0_4_0` and updated to assert the new `Ok(())` semantics.
+- README updated: v0.4.0 milestone marked current, v0.3.0 marked shipped; Quick Start replaces the staged-surface flush example with a directory-backed `open(path)` walkthrough; benchmark and testing sections updated for the new `file_store` group and `tests/persistence.rs`; Architecture module list expanded to include `backend.rs`, `file_store.rs`, `codec.rs`, `platform.rs`.
+- Crate-level rustdoc (in `src/lib.rs`) — the third runnable example now demonstrates the durable-storage lifecycle (open, upsert, flush, close) instead of the staged-surface `Error::NotImplemented` pattern.
 
 ### Removed
 
-Nothing removed in v0.3.0 — the surface is additive on top of v0.2.0.
+Nothing removed in v0.4.0 — the surface is additive on top of v0.3.0. The `Error::NotImplemented` variant remains in the public API (still `#[non_exhaustive]`) so future-milestone wiring patterns can continue to use it.
 
-[Unreleased]: https://github.com/jamesgober/iqdb/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jamesgober/iqdb/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jamesgober/iqdb/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jamesgober/iqdb/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jamesgober/iqdb/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jamesgober/iqdb/releases/tag/v0.1.0

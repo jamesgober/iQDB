@@ -32,19 +32,19 @@ jobs:
         run: cargo test --no-default-features --features "${{ matrix.features }}" --verbose
 
   msrv:
-    name: MSRV (1.75)
+    name: MSRV (1.87)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - name: Install MSRV toolchain
         # Pin the action ref to a stable branch and pass the toolchain
         # via `with: toolchain:`. The action's `@<ref>` only resolves
-        # against tagged refs (`stable`, `nightly`, `1.75.0`, ...) — a
-        # no-patch like `1.75` would 404. The `toolchain:` input is
-        # liberal and accepts both `1.75` and `1.75.0`.
+        # against tagged refs (`stable`, `nightly`, `1.87.0`, ...) — a
+        # no-patch like `1.87` would 404. The `toolchain:` input is
+        # liberal and accepts both `1.87` and `1.87.0`.
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.75"
+          toolchain: "1.87"
       # Some transitive dependencies may ship with `edition = "2024"`
       # in their newest patch releases, which older MSRV toolchains do
       # not understand. Pin offenders here with a comment that names

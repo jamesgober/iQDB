@@ -35,10 +35,10 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
+use crate::backend::Backend;
 use crate::error::Result;
 use crate::payload::Payload;
 use crate::record::{Record, RecordId};
-use crate::store::MemoryStore;
 use crate::vector::{DistanceMetric, Vector};
 
 /// A single hit returned by similarity search.
@@ -102,7 +102,7 @@ pub struct SearchResult {
 /// `O(log k)`. For `k = 0` the function short-circuits with an
 /// empty result.
 pub(crate) fn flat_search<F>(
-    store: &MemoryStore,
+    backend: &Backend,
     query: &Vector,
     k: usize,
     metric: DistanceMetric,
@@ -115,7 +115,7 @@ where
         return Ok(Vec::new());
     }
 
-    store.with_records(|records| {
+    backend.with_records(|records| {
         let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::with_capacity(k + 1);
 
         for record in records.values() {
@@ -219,8 +219,9 @@ fn compare_score(a: f32, b: f32) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::MemoryStore;
 
-    fn build_store(records: &[(u64, Vec<f32>)]) -> MemoryStore {
+    fn build_backend(records: &[(u64, Vec<f32>)]) -> Backend {
         let store = MemoryStore::new();
         for (id, components) in records {
             let v = Vector::new(components.clone()).expect("finite");
@@ -228,7 +229,7 @@ mod tests {
                 .upsert(Record::new(RecordId::new(*id), v))
                 .expect("upsert ok");
         }
-        store
+        Backend::Memory(store)
     }
 
     fn always_accept(_record: &Record) -> bool {
@@ -237,50 +238,50 @@ mod tests {
 
     #[test]
     fn k_zero_returns_empty() {
-        let store = build_store(&[(1, vec![1.0, 0.0])]);
+        let backend = build_backend(&[(1, vec![1.0, 0.0])]);
         let q = Vector::new(vec![1.0, 0.0]).unwrap();
-        let out = flat_search(&store, &q, 0, DistanceMetric::L2, always_accept).unwrap();
+        let out = flat_search(&backend, &q, 0, DistanceMetric::L2, always_accept).unwrap();
         assert!(out.is_empty());
     }
 
     #[test]
     fn empty_store_returns_empty() {
-        let store = MemoryStore::new();
+        let backend = Backend::Memory(MemoryStore::new());
         let q = Vector::new(vec![1.0, 0.0]).unwrap();
-        let out = flat_search(&store, &q, 5, DistanceMetric::L2, always_accept).unwrap();
+        let out = flat_search(&backend, &q, 5, DistanceMetric::L2, always_accept).unwrap();
         assert!(out.is_empty());
     }
 
     #[test]
     fn returns_at_most_k_results() {
-        let store = build_store(&[
+        let backend = build_backend(&[
             (1, vec![1.0, 0.0]),
             (2, vec![0.0, 1.0]),
             (3, vec![0.5, 0.5]),
             (4, vec![1.0, 1.0]),
         ]);
         let q = Vector::new(vec![1.0, 0.0]).unwrap();
-        let out = flat_search(&store, &q, 2, DistanceMetric::L2, always_accept).unwrap();
+        let out = flat_search(&backend, &q, 2, DistanceMetric::L2, always_accept).unwrap();
         assert_eq!(out.len(), 2);
     }
 
     #[test]
     fn k_larger_than_store_returns_all() {
-        let store = build_store(&[(1, vec![1.0, 0.0]), (2, vec![0.0, 1.0])]);
+        let backend = build_backend(&[(1, vec![1.0, 0.0]), (2, vec![0.0, 1.0])]);
         let q = Vector::new(vec![1.0, 0.0]).unwrap();
-        let out = flat_search(&store, &q, 100, DistanceMetric::L2, always_accept).unwrap();
+        let out = flat_search(&backend, &q, 100, DistanceMetric::L2, always_accept).unwrap();
         assert_eq!(out.len(), 2);
     }
 
     #[test]
     fn results_are_sorted_ascending_by_score() {
-        let store = build_store(&[
+        let backend = build_backend(&[
             (1, vec![10.0, 0.0]),
             (2, vec![1.0, 0.0]),
             (3, vec![5.0, 0.0]),
         ]);
         let q = Vector::new(vec![0.0, 0.0]).unwrap();
-        let out = flat_search(&store, &q, 3, DistanceMetric::L2, always_accept).unwrap();
+        let out = flat_search(&backend, &q, 3, DistanceMetric::L2, always_accept).unwrap();
         assert_eq!(out.len(), 3);
         // Distance from origin: 1, 5, 10 → ids 2, 3, 1.
         assert_eq!(out[0].id, RecordId::new(2));
@@ -292,23 +293,23 @@ mod tests {
 
     #[test]
     fn filter_excludes_records_before_admission() {
-        let store = build_store(&[
+        let backend = build_backend(&[
             (1, vec![1.0, 0.0]),
             (2, vec![0.99, 0.0]),
             (3, vec![0.5, 0.0]),
         ]);
         let q = Vector::new(vec![1.0, 0.0]).unwrap();
         // Filter out the perfect match (id 1).
-        let out = flat_search(&store, &q, 2, DistanceMetric::L2, |r| r.id().get() != 1).unwrap();
+        let out = flat_search(&backend, &q, 2, DistanceMetric::L2, |r| r.id().get() != 1).unwrap();
         assert_eq!(out.len(), 2);
         assert!(out.iter().all(|r| r.id != RecordId::new(1)));
     }
 
     #[test]
     fn dimension_mismatch_returns_error() {
-        let store = build_store(&[(1, vec![1.0, 0.0])]);
+        let backend = build_backend(&[(1, vec![1.0, 0.0])]);
         let q = Vector::new(vec![1.0, 0.0, 0.0]).unwrap();
-        let err = flat_search(&store, &q, 1, DistanceMetric::L2, always_accept).unwrap_err();
+        let err = flat_search(&backend, &q, 1, DistanceMetric::L2, always_accept).unwrap_err();
         assert!(matches!(
             err,
             crate::Error::DimensionMismatch { left: 3, right: 2 }
@@ -318,13 +319,13 @@ mod tests {
     #[test]
     fn cosine_against_zero_vector_yields_nan_at_tail() {
         // Cosine is undefined when either operand has zero norm.
-        let store = build_store(&[
+        let backend = build_backend(&[
             (1, vec![1.0, 0.0]),
             (2, vec![0.0, 0.0]), // zero vector → cosine produces NaN
             (3, vec![0.5, 0.5]),
         ]);
         let q = Vector::new(vec![1.0, 0.0]).unwrap();
-        let out = flat_search(&store, &q, 3, DistanceMetric::Cosine, always_accept).unwrap();
+        let out = flat_search(&backend, &q, 3, DistanceMetric::Cosine, always_accept).unwrap();
         assert_eq!(out.len(), 3);
         // The NaN-scoring record sorts to the tail.
         assert_eq!(out[2].id, RecordId::new(2));
@@ -338,13 +339,13 @@ mod tests {
     #[test]
     fn tie_break_by_id_is_deterministic() {
         // Two records at the same distance → ids decide ordering.
-        let store = build_store(&[
+        let backend = build_backend(&[
             (10, vec![1.0, 0.0]),
             (5, vec![1.0, 0.0]),
             (20, vec![1.0, 0.0]),
         ]);
         let q = Vector::new(vec![1.0, 0.0]).unwrap();
-        let out = flat_search(&store, &q, 3, DistanceMetric::L2, always_accept).unwrap();
+        let out = flat_search(&backend, &q, 3, DistanceMetric::L2, always_accept).unwrap();
         let ids: Vec<u64> = out.iter().map(|r| r.id.get()).collect();
         // All scores 0; tie-break ascending on id.
         assert_eq!(ids, vec![5, 10, 20]);
@@ -362,8 +363,9 @@ mod tests {
                 payload,
             ))
             .unwrap();
+        let backend = Backend::Memory(store);
         let q = Vector::new(vec![1.0, 0.0]).unwrap();
-        let out = flat_search(&store, &q, 1, DistanceMetric::L2, always_accept).unwrap();
+        let out = flat_search(&backend, &q, 1, DistanceMetric::L2, always_accept).unwrap();
         let hit = &out[0];
         let attached = hit.payload.as_ref().expect("payload attached");
         assert!(attached.contains_key("kind"));
