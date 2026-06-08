@@ -1,276 +1,244 @@
-//! Integration tests for the v0.4.0 file-backed persistence surface.
+// Copyright 2026 James Gober. Licensed under Apache-2.0 OR MIT.
+
+//! Integration tests for the durable, file-backed store.
 //!
-//! These tests exercise the durable lifecycle through the public
-//! `Iqdb::open(path)` entry point — they validate the full handle,
-//! not just the internal `FileStore` (which has its own unit tests
-//! inside the crate). Tempdirs are created per-test with monotonic
-//! nanosecond names so a parallel test run does not stomp itself.
+//! These exercise the contract iqdb inherits from `iqdb-persist`: a write
+//! that is acknowledged (and flushed, or merely logged under the default
+//! always-fsync policy) survives a process restart, the snapshot + WAL pair
+//! reconstructs the in-memory state on reopen, and a reopen that disagrees
+//! with the stored shape fails loudly rather than loading wrong state.
 
-use std::path::PathBuf;
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use iqdb::{DistanceMetric, Error, Iqdb, Payload, PayloadValue, Record, RecordId, Vector};
+use iqdb::{
+    DistanceMetric, IndexKind, Iqdb, IqdbConfig, IvfConfig, Metadata, Value, Vector, VectorId,
+};
 
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn tempdir() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("iqdb-int-{nanos}-{n}"));
-    std::fs::create_dir_all(&dir).expect("mkdir");
-    dir
+/// A unique temp directory holding one database file, removed on drop.
+struct TempDb {
+    dir: PathBuf,
 }
 
-fn cleanup(path: &PathBuf) {
-    let _ = std::fs::remove_dir_all(path);
-}
+static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn record(id: u64, components: Vec<f32>) -> Record {
-    Record::new(RecordId::new(id), Vector::new(components).unwrap())
-}
-
-#[test]
-fn open_on_fresh_directory_creates_empty_database() {
-    let dir = tempdir();
-    let child = dir.join("nested");
-    {
-        let db = Iqdb::open(&child).expect("open");
-        assert!(db.is_empty());
-        assert_eq!(db.len(), 0);
+impl TempDb {
+    fn new() -> Self {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("iqdb-it-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        Self { dir }
     }
-    assert!(child.is_dir());
-    cleanup(&dir);
+
+    fn path(&self) -> PathBuf {
+        self.dir.join("db.iqdb")
+    }
+}
+
+impl Drop for TempDb {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn v(xs: &[f32]) -> Vector {
+    Vector::new(xs.to_vec()).unwrap()
 }
 
 #[test]
-fn upserted_records_survive_close_and_reopen() {
-    let dir = tempdir();
+fn create_upsert_close_reopen_round_trip() {
+    let tmp = TempDb::new();
+    let path = tmp.path();
+
     {
-        let db = Iqdb::open(&dir).unwrap();
-        db.upsert(record(1, vec![0.1, 0.2, 0.3])).unwrap();
-        db.upsert(record(2, vec![1.0, 0.0, 0.0])).unwrap();
-        db.upsert(record(3, vec![0.0, 1.0, 0.0])).unwrap();
+        let db = Iqdb::open(&path, 3, DistanceMetric::Cosine).unwrap();
+        db.upsert(VectorId::from(1u64), v(&[0.1, 0.2, 0.3]), None)
+            .unwrap();
+        db.upsert(VectorId::from(2u64), v(&[0.9, 0.0, 0.1]), None)
+            .unwrap();
+        assert_eq!(db.len(), 2);
         db.close().unwrap();
     }
-    let db = Iqdb::open(&dir).unwrap();
-    assert_eq!(db.len(), 3);
-    let hit = db.get(RecordId::new(2)).unwrap().expect("present");
-    assert_eq!(hit.vector().as_slice(), &[1.0, 0.0, 0.0]);
-    cleanup(&dir);
-}
 
-#[test]
-fn deletes_survive_close_and_reopen() {
-    let dir = tempdir();
-    {
-        let db = Iqdb::open(&dir).unwrap();
-        db.upsert(record(1, vec![1.0, 0.0])).unwrap();
-        db.upsert(record(2, vec![0.0, 1.0])).unwrap();
-        let _ = db.delete(RecordId::new(1)).unwrap();
-        db.close().unwrap();
-    }
-    let db = Iqdb::open(&dir).unwrap();
-    assert_eq!(db.len(), 1);
-    assert!(db.get(RecordId::new(1)).unwrap().is_none());
-    assert!(db.get(RecordId::new(2)).unwrap().is_some());
-    cleanup(&dir);
-}
-
-#[test]
-fn payload_round_trips_through_persistence() {
-    let dir = tempdir();
-    {
-        let db = Iqdb::open(&dir).unwrap();
-        let mut p = Payload::new();
-        let _ = p.insert("kind", "doc");
-        let _ = p.insert("year", 2026_i64);
-        let _ = p.insert("score", 0.97_f64);
-        let _ = p.insert("verified", true);
-        let _ = p.insert("blob", PayloadValue::Bytes(vec![1, 2, 3, 4]));
-
-        db.upsert(Record::with_payload(
-            RecordId::new(7),
-            Vector::new(vec![0.5, 0.5, 0.5]).unwrap(),
-            p,
-        ))
-        .unwrap();
-        db.close().unwrap();
-    }
-    let db = Iqdb::open(&dir).unwrap();
-    let hit = db.get(RecordId::new(7)).unwrap().expect("present");
-    let payload = hit.payload().expect("payload preserved");
-    assert_eq!(
-        payload.get("kind").and_then(PayloadValue::as_text),
-        Some("doc")
-    );
-    assert_eq!(
-        payload.get("year").and_then(PayloadValue::as_int),
-        Some(2026)
-    );
-    assert!(payload
-        .get("score")
-        .and_then(PayloadValue::as_float)
-        .map(|f| (f - 0.97).abs() < 1e-9)
-        .unwrap_or(false));
-    assert_eq!(
-        payload.get("verified").and_then(PayloadValue::as_bool),
-        Some(true)
-    );
-    assert_eq!(
-        payload
-            .get("blob")
-            .and_then(PayloadValue::as_bytes)
-            .map(<[u8]>::to_vec),
-        Some(vec![1, 2, 3, 4])
-    );
-    cleanup(&dir);
-}
-
-#[test]
-fn flush_without_close_recovers_via_wal_replay() {
-    let dir = tempdir();
-    {
-        let db = Iqdb::open(&dir).unwrap();
-        db.upsert(record(1, vec![1.0, 0.0])).unwrap();
-        db.upsert(record(2, vec![0.0, 1.0])).unwrap();
-        db.flush().unwrap();
-        // No `close()` — the handle is dropped, the WAL is left
-        // un-truncated. Recovery on next open replays it on top of
-        // the (empty, default) snapshot.
-    }
-    let db = Iqdb::open(&dir).unwrap();
+    let db = Iqdb::open(&path, 3, DistanceMetric::Cosine).unwrap();
     assert_eq!(db.len(), 2);
-    assert!(db.get(RecordId::new(1)).unwrap().is_some());
-    assert!(db.get(RecordId::new(2)).unwrap().is_some());
-    cleanup(&dir);
+    let (got, _) = db.get(&VectorId::from(1u64)).unwrap().expect("present");
+    assert_eq!(got.as_slice(), &[0.1, 0.2, 0.3]);
 }
 
 #[test]
-fn upsert_without_flush_or_close_is_still_replayed_on_reopen() {
-    // The OS page cache typically keeps the WAL append visible to a
-    // subsequent open even without an fsync — durability against a
-    // power cut requires `flush`, but a clean process exit followed
-    // by a new process opening the same path sees the appended data.
-    let dir = tempdir();
+fn recovery_without_close_replays_the_wal() {
+    let tmp = TempDb::new();
+    let path = tmp.path();
+
     {
-        let db = Iqdb::open(&dir).unwrap();
-        db.upsert(record(1, vec![1.0, 0.0])).unwrap();
-        // Drop without flush or close.
+        // No flush, no close — just drop the handle. The default always-fsync
+        // WAL policy means each acknowledged upsert is already durable.
+        let db = Iqdb::open(&path, 2, DistanceMetric::Euclidean).unwrap();
+        db.upsert(VectorId::from(7u64), v(&[1.0, 2.0]), None)
+            .unwrap();
+        db.upsert(VectorId::from(8u64), v(&[3.0, 4.0]), None)
+            .unwrap();
     }
-    let db = Iqdb::open(&dir).unwrap();
-    assert_eq!(db.len(), 1);
-    assert_eq!(
-        db.get(RecordId::new(1)).unwrap().map(|r| r.id().get()),
-        Some(1)
-    );
-    cleanup(&dir);
+
+    let db = Iqdb::open(&path, 2, DistanceMetric::Euclidean).unwrap();
+    assert_eq!(db.len(), 2);
+    assert!(db.get(&VectorId::from(7u64)).unwrap().is_some());
+    assert!(db.get(&VectorId::from(8u64)).unwrap().is_some());
 }
 
 #[test]
-fn open_rejects_existing_file_path() {
-    let dir = tempdir();
-    let file_path = dir.join("not-a-directory");
-    std::fs::write(&file_path, b"data").unwrap();
-    let err = Iqdb::open(&file_path).unwrap_err();
-    assert!(matches!(err, Error::InvalidConfig(_)));
-    cleanup(&dir);
-}
+fn delete_persists_across_reopen() {
+    let tmp = TempDb::new();
+    let path = tmp.path();
 
-#[test]
-fn search_works_against_recovered_data() {
-    let dir = tempdir();
     {
-        let db = Iqdb::open(&dir).unwrap();
-        db.upsert(record(1, vec![1.0, 0.0, 0.0])).unwrap();
-        db.upsert(record(2, vec![0.0, 1.0, 0.0])).unwrap();
-        db.upsert(record(3, vec![0.0, 0.0, 1.0])).unwrap();
+        let db = Iqdb::open(&path, 1, DistanceMetric::Euclidean).unwrap();
+        db.upsert(VectorId::from(1u64), v(&[1.0]), None).unwrap();
+        db.upsert(VectorId::from(2u64), v(&[2.0]), None).unwrap();
+        assert!(db.delete(&VectorId::from(1u64)).unwrap());
         db.close().unwrap();
     }
-    let db = Iqdb::open(&dir).unwrap();
-    let probe = Vector::new(vec![1.0, 0.0, 0.0]).unwrap();
-    let hits = db.search(&probe, 2, DistanceMetric::Cosine).unwrap();
-    assert_eq!(hits.len(), 2);
-    assert_eq!(hits[0].id, RecordId::new(1));
-    cleanup(&dir);
+
+    let db = Iqdb::open(&path, 1, DistanceMetric::Euclidean).unwrap();
+    assert_eq!(db.len(), 1);
+    assert!(db.get(&VectorId::from(1u64)).unwrap().is_none());
+    assert!(db.get(&VectorId::from(2u64)).unwrap().is_some());
 }
 
 #[test]
-fn multiple_reopen_cycles_preserve_state() {
-    let dir = tempdir();
-    for round in 0..5_u64 {
-        let db = Iqdb::open(&dir).unwrap();
-        db.upsert(record(round, vec![round as f32, 0.0, 0.0]))
+fn metadata_survives_round_trip() {
+    let tmp = TempDb::new();
+    let path = tmp.path();
+    let meta: Metadata = [
+        ("kind".to_string(), Value::String("doc".into())),
+        ("year".to_string(), Value::Int(2026)),
+        ("score".to_string(), Value::Float(0.875)),
+        ("ok".to_string(), Value::Bool(true)),
+    ]
+    .into_iter()
+    .collect();
+
+    {
+        let db = Iqdb::open(&path, 2, DistanceMetric::Cosine).unwrap();
+        db.upsert(VectorId::from(1u64), v(&[1.0, 0.0]), Some(meta.clone()))
             .unwrap();
         db.close().unwrap();
     }
-    let db = Iqdb::open(&dir).unwrap();
-    assert_eq!(db.len(), 5);
-    for round in 0..5_u64 {
-        assert!(db.get(RecordId::new(round)).unwrap().is_some());
-    }
-    cleanup(&dir);
+
+    let db = Iqdb::open(&path, 2, DistanceMetric::Cosine).unwrap();
+    let (_, got_meta) = db.get(&VectorId::from(1u64)).unwrap().expect("present");
+    assert_eq!(got_meta.as_ref(), Some(&meta));
 }
 
 #[test]
-fn close_truncates_wal_to_zero_bytes() {
-    let dir = tempdir();
+fn search_against_recovered_data() {
+    let tmp = TempDb::new();
+    let path = tmp.path();
+
     {
-        let db = Iqdb::open(&dir).unwrap();
-        for id in 0..50_u64 {
-            db.upsert(record(id, vec![id as f32, 0.0])).unwrap();
+        let db = Iqdb::open(&path, 2, DistanceMetric::Euclidean).unwrap();
+        db.upsert(VectorId::from(1u64), v(&[0.0, 0.0]), None)
+            .unwrap();
+        db.upsert(VectorId::from(2u64), v(&[10.0, 10.0]), None)
+            .unwrap();
+        db.close().unwrap();
+    }
+
+    let db = Iqdb::open(&path, 2, DistanceMetric::Euclidean).unwrap();
+    let hits = db.search(&v(&[0.1, 0.1]), 2).unwrap();
+    assert_eq!(hits[0].id, VectorId::from(1u64));
+    assert_eq!(hits[1].id, VectorId::from(2u64));
+}
+
+#[test]
+fn reopen_with_wrong_dim_is_rejected() {
+    let tmp = TempDb::new();
+    let path = tmp.path();
+
+    {
+        let db = Iqdb::open(&path, 3, DistanceMetric::Cosine).unwrap();
+        db.upsert(VectorId::from(1u64), v(&[1.0, 0.0, 0.0]), None)
+            .unwrap();
+        db.close().unwrap();
+    }
+
+    let err = Iqdb::open(&path, 4, DistanceMetric::Cosine).unwrap_err();
+    assert!(matches!(err, iqdb::Error::Config(_)), "got {err:?}");
+}
+
+#[test]
+fn reopen_with_wrong_metric_is_rejected() {
+    let tmp = TempDb::new();
+    let path = tmp.path();
+
+    {
+        let db = Iqdb::open(&path, 2, DistanceMetric::Cosine).unwrap();
+        db.upsert(VectorId::from(1u64), v(&[1.0, 0.0]), None)
+            .unwrap();
+        db.close().unwrap();
+    }
+
+    let err = Iqdb::open(&path, 2, DistanceMetric::Euclidean).unwrap_err();
+    assert!(matches!(err, iqdb::Error::Config(_)), "got {err:?}");
+}
+
+#[test]
+fn ivf_database_persists_index_kind_and_searches_after_reopen() {
+    let tmp = TempDb::new();
+    let path = tmp.path();
+    let cfg = IqdbConfig::new(2, DistanceMetric::Euclidean).index(IndexKind::Ivf(
+        IvfConfig::default()
+            .with_n_clusters(2)
+            .with_n_probes(2)
+            .with_training_sample_size(64)
+            .with_seed(7),
+    ));
+
+    {
+        let db = Iqdb::open_with(&path, cfg).unwrap();
+        for (i, p) in [[0.0, 0.0], [0.1, -0.1], [10.0, 10.0], [9.9, 10.1]]
+            .iter()
+            .enumerate()
+        {
+            db.upsert(VectorId::from(i as u64), v(p), None).unwrap();
         }
+        // Search materializes + trains the IVF index, then close compacts it.
+        let hits = db.search(&v(&[0.0, 0.0]), 1).unwrap();
+        assert_eq!(hits[0].id, VectorId::from(0u64));
         db.close().unwrap();
     }
-    let wal_len = std::fs::metadata(dir.join("wal")).unwrap().len();
-    assert_eq!(wal_len, 0, "WAL must be empty after compaction");
-    let snap_len = std::fs::metadata(dir.join("snap")).unwrap().len();
-    assert!(snap_len > 0, "snapshot must contain the records");
-    cleanup(&dir);
+
+    // Reopen with a plain Flat request: the stored IVF kind wins (it is part
+    // of the database identity), and search still works after the rebuild.
+    let db = Iqdb::open(&path, 2, DistanceMetric::Euclidean).unwrap();
+    assert_eq!(db.len(), 4);
+    let hits = db.search(&v(&[10.0, 10.0]), 1).unwrap();
+    assert_eq!(hits[0].id, VectorId::from(2u64));
 }
 
 #[test]
-fn corrupt_snapshot_surfaces_corrupt_error() {
-    let dir = tempdir();
-    {
-        let db = Iqdb::open(&dir).unwrap();
-        db.upsert(record(1, vec![1.0, 0.0])).unwrap();
+fn multiple_sessions_accumulate() {
+    let tmp = TempDb::new();
+    let path = tmp.path();
+
+    for i in 0..5u64 {
+        let db = Iqdb::open(&path, 1, DistanceMetric::Euclidean).unwrap();
+        db.upsert(VectorId::from(i), v(&[i as f32]), None).unwrap();
         db.close().unwrap();
     }
-    // Overwrite the snapshot with bytes that fail the magic check.
-    std::fs::write(dir.join("snap"), b"NOPE\x01\x00\x00\x00").unwrap();
-    let err = Iqdb::open(&dir).unwrap_err();
-    assert!(matches!(err, Error::Corrupt { .. }));
-    cleanup(&dir);
+
+    let db = Iqdb::open(&path, 1, DistanceMetric::Euclidean).unwrap();
+    assert_eq!(db.len(), 5);
 }
 
 #[test]
-fn corrupt_wal_tail_is_truncated_silently() {
-    let dir = tempdir();
-    {
-        let db = Iqdb::open(&dir).unwrap();
-        db.upsert(record(1, vec![1.0, 0.0])).unwrap();
-        db.flush().unwrap();
-    }
-    // Append junk to the WAL. The next open should recover the
-    // single committed record and truncate the garbage.
-    use std::io::Write;
-    let mut wal = std::fs::OpenOptions::new()
-        .append(true)
-        .open(dir.join("wal"))
-        .unwrap();
-    wal.write_all(&[0xFFu8; 64]).unwrap();
-    wal.sync_all().unwrap();
-    drop(wal);
-
-    let db = Iqdb::open(&dir).unwrap();
-    assert_eq!(db.len(), 1);
-    // After open, the WAL is back to a clean state and new writes
-    // succeed.
-    db.upsert(record(2, vec![0.0, 1.0])).unwrap();
-    db.close().unwrap();
-    cleanup(&dir);
+fn path_helper_is_used() {
+    // Touch the helper so the lint profile sees it exercised.
+    let tmp = TempDb::new();
+    let _p: &Path = &tmp.dir;
+    assert!(tmp.path().ends_with("db.iqdb"));
 }

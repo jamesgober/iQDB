@@ -6,6 +6,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-06-08
+
+v0.5.0 re-platforms `iqdb` from a self-contained crate onto the **iqdb crate family**. `iqdb` is now the integration layer that composes the family for its vocabulary, index seam, index implementations, durability, and caching. This is a **breaking change**: the entire public surface moves to the family vocabulary, and a database now fixes its dimensionality and distance metric at open time. The crate is pre-1.0, so the break is permitted under SemVer.
+
+### Added
+
+- The crate now depends on and composes the published 1.0 family: [`iqdb-types`], [`iqdb-distance`], [`iqdb-index`], [`iqdb-filter`], [`iqdb-flat`], [`iqdb-hnsw`], [`iqdb-ivf`], [`iqdb-build`], [`iqdb-persist`], and [`iqdb-cache`].
+- The shared vocabulary is re-exported from `iqdb-types`: `Vector`, `VectorId`, `Metadata`, `Value`, `Hit`, `Filter`, `DistanceMetric`, `SearchParams`.
+- Selectable index implementation through [`IndexKind`](./src/config.rs): `Flat` (exact, the recall ground truth), `Hnsw(HnswConfig)` (graph ANN), and `Ivf(IvfConfig)` (clustered ANN, IVF-Flat or IVF-PQ). `HnswConfig`, `IvfConfig`, and `CacheConfig` are re-exported for tuning.
+- Fluent [`IqdbConfig`](./src/config.rs) (`IqdbConfig::new(dim, metric).index(..).cache(..)`) and the Tier-2 constructors `Iqdb::open_in_memory_with` / `Iqdb::open_with`.
+- Durable, file-backed storage via `iqdb-persist`: atomic snapshot + write-ahead log, CRC32-checked frames, crash recovery with corrupt-tail truncation, and optional `zstd` / `lz4` snapshot compression.
+- Optional result cache via `iqdb-cache`, configured through `IqdbConfig::cache`; `Iqdb::cache_stats` reports hit/miss counts.
+- `Iqdb::optimize` — rebuilds / retrains the approximate index (notably IVF centroids) over the current vectors.
+- New `index_selection` example demonstrating flat / HNSW / IVF selection, caching, and `optimize`. The `basic`, `in_memory_store`, `search`, and `persistence` examples are rewritten for the new surface.
+- Recall validation at [`tests/recall.rs`](./tests/recall.rs): HNSW and IVF measured against the exact flat oracle on deterministic synthetic data.
+- New Criterion bench group at [`benches/search.rs`](./benches/search.rs) — flat and HNSW search throughput plus the write path.
+- Feature flags `serde`, `parallel`, `zstd`, and `lz4`, each forwarding to the relevant family crate.
+
+### Changed
+
+- **Edition bumped to 2024** (MSRV unchanged at 1.87).
+- **`dim` and `metric` are fixed at construction.** All constructors take `(dim, metric)` (or an `IqdbConfig` carrying them) instead of inferring dimensionality from the first vector.
+- **`search` loses its `metric` argument** — `search(&query, k)` and `search_with(&query, k, filter)` use the metric fixed at open. (Breaking.)
+- **`upsert` takes `(VectorId, Vector, Option<Metadata>)`** rather than a `Record`. Wrong-dimension vectors are rejected at `upsert`, not at search time. (Breaking.)
+- **`get` returns `Option<(Vector, Option<Metadata>)>`** and **`search` returns `Vec<Hit>`** (`Hit { id, distance, metadata }`) instead of `Vec<SearchResult>`. (Breaking.)
+- **Filters are declarative `Filter` expressions** evaluated against `Metadata`, replacing the closure predicate. On flat the filter is exact (pre-scan); on HNSW / IVF it is a post-filter that can under-return under high selectivity. (Breaking.)
+- **`open(path, dim, metric)` treats `path` as the snapshot file** (the WAL lives beside it), replacing the v0.4.0 directory layout. A reopen whose `dim` / `metric` disagrees with the stored database fails with `Error::Config`. (Breaking.)
+- **`open_in_memory` / `open_in_memory_with` return `Result<Self>`** — construction validates `dim` (and the index configuration) and reports `dim == 0` and unsupported IVF-PQ metrics as errors rather than panicking. (Breaking.)
+- **`Error` is now a three-variant `#[non_exhaustive]` enum** — `Index(IqdbError)`, `Persist(PersistError)`, `Config(&'static str)` — wrapping the family error vocabularies. (Breaking.)
+
+### Removed
+
+- The self-contained vocabulary — `Record`, `RecordId`, `Payload`, `PayloadValue`, `SearchResult`, and the in-crate `Vector` / `DistanceMetric` / `Error` — is replaced by the re-exported family types. `DistanceMetric` now offers `Cosine`, `DotProduct`, `Euclidean`, `Manhattan`, and `Hamming` (the v0.4.0 `L2` becomes `Euclidean`, `Dot` becomes `DotProduct`). (Breaking.)
+- The hand-rolled persistence stack (`codec`, `file_store`, `platform`) and the `Error::NotImplemented` / `Error::Corrupt` variants are gone — durability and corrupt-frame handling now come from `iqdb-persist`. The Unix-only `libc` dependency is dropped.
+- The "zero runtime dependencies" property no longer holds: composing the family pulls the family crates and their transitive dependencies.
+
+[`iqdb-types`]: https://crates.io/crates/iqdb-types
+[`iqdb-distance`]: https://crates.io/crates/iqdb-distance
+[`iqdb-index`]: https://crates.io/crates/iqdb-index
+[`iqdb-filter`]: https://crates.io/crates/iqdb-filter
+[`iqdb-flat`]: https://crates.io/crates/iqdb-flat
+[`iqdb-hnsw`]: https://crates.io/crates/iqdb-hnsw
+[`iqdb-ivf`]: https://crates.io/crates/iqdb-ivf
+[`iqdb-build`]: https://crates.io/crates/iqdb-build
+[`iqdb-persist`]: https://crates.io/crates/iqdb-persist
+[`iqdb-cache`]: https://crates.io/crates/iqdb-cache
+
 ## [0.4.0] — 2026-05-30
 
 ### Added
@@ -40,7 +87,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Nothing removed in v0.4.0 — the surface is additive on top of v0.3.0. The `Error::NotImplemented` variant remains in the public API (still `#[non_exhaustive]`) so future-milestone wiring patterns can continue to use it.
 
-[Unreleased]: https://github.com/jamesgober/iqdb/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/jamesgober/iqdb/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jamesgober/iqdb/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jamesgober/iqdb/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jamesgober/iqdb/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jamesgober/iqdb/compare/v0.1.0...v0.2.0

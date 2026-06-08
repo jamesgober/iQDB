@@ -1,65 +1,68 @@
-//! Walk-through of the v0.2.0 in-memory store: upsert records with
-//! typed payloads, look them up, compare distances between them, and
-//! delete an entry.
+// Copyright 2026 James Gober. Licensed under Apache-2.0 OR MIT.
+
+//! A fuller in-memory walkthrough: metadata, replace-on-upsert, and a
+//! metadata-filtered search.
 //!
-//! Run with:
-//! ```sh
-//! cargo run --example in_memory_store --release
-//! ```
+//! Run with `cargo run --example in_memory_store`.
 
-use iqdb::{DistanceMetric, Iqdb, Payload, Record, RecordId, Result, Vector};
+use iqdb::{DistanceMetric, Filter, Iqdb, Metadata, Result, Value, Vector, VectorId};
 
-fn main() -> Result<()> {
-    // An in-memory store never touches the filesystem.
-    let db = Iqdb::open_in_memory();
-
-    // Populate three short embeddings with metadata.
-    db.upsert(record(1, [1.0, 0.0, 0.0], &[("topic", "rust")]))?;
-    db.upsert(record(2, [0.0, 1.0, 0.0], &[("topic", "python")]))?;
-    db.upsert(record(3, [0.0, 0.0, 1.0], &[("topic", "go")]))?;
-
-    println!("stored {} records", db.len());
-
-    // Look up record 2 and inspect its payload.
-    if let Some(rec) = db.get(RecordId::new(2))? {
-        let topic = rec
-            .payload()
-            .and_then(|p| p.get("topic"))
-            .and_then(iqdb::PayloadValue::as_text)
-            .unwrap_or("?");
-        println!("id=2 → topic={topic}");
-    }
-
-    // Compare record 1 against the others under L2 and cosine.
-    let r1 = db
-        .get(RecordId::new(1))?
-        .ok_or(iqdb::Error::InvalidConfig("missing seed record"))?;
-    for id in [2_u64, 3] {
-        if let Some(other) = db.get(RecordId::new(id))? {
-            let l2 = DistanceMetric::L2.distance(r1.vector(), other.vector())?;
-            let cos = DistanceMetric::Cosine.distance(r1.vector(), other.vector())?;
-            println!("dist(1,{id}) → L2={l2:.4}  cosine={cos:.4}");
-        }
-    }
-
-    // Remove record 3 and confirm.
-    let removed = db.delete(RecordId::new(3))?;
-    println!("delete(3) → removed={removed}, len={}", db.len());
-
-    // Release the handle.
-    db.close()?;
-    Ok(())
+fn meta(kind: &str, year: i64) -> Metadata {
+    [
+        ("kind".to_string(), Value::String(kind.to_string())),
+        ("year".to_string(), Value::Int(year)),
+    ]
+    .into_iter()
+    .collect()
 }
 
-fn record(id: u64, components: [f32; 3], meta: &[(&str, &str)]) -> Record {
-    let vector = Vector::new(components.to_vec()).expect("finite components");
-    if meta.is_empty() {
-        Record::new(RecordId::new(id), vector)
-    } else {
-        let mut payload = Payload::new();
-        for (k, v) in meta {
-            let _ = payload.insert(*k, *v);
-        }
-        Record::with_payload(RecordId::new(id), vector, payload)
+fn main() -> Result<()> {
+    let db = Iqdb::open_in_memory(4, DistanceMetric::Cosine)?;
+
+    db.upsert(
+        VectorId::from(1u64),
+        Vector::new(vec![1.0, 0.0, 0.0, 0.0])?,
+        Some(meta("doc", 2024)),
+    )?;
+    db.upsert(
+        VectorId::from(2u64),
+        Vector::new(vec![0.9, 0.1, 0.0, 0.0])?,
+        Some(meta("doc", 2026)),
+    )?;
+    db.upsert(
+        VectorId::from(3u64),
+        Vector::new(vec![0.8, 0.2, 0.0, 0.0])?,
+        Some(meta("image", 2026)),
+    )?;
+
+    // Upsert with an existing id replaces in place — the count is unchanged.
+    db.upsert(
+        VectorId::from(2u64),
+        Vector::new(vec![0.95, 0.05, 0.0, 0.0])?,
+        Some(meta("doc", 2027)),
+    )?;
+    println!("stored {} records", db.len());
+
+    let (_, m) = db.get(&VectorId::from(2u64))?.expect("present");
+    println!("record 2 metadata: {:?}", m);
+
+    let query = Vector::new(vec![1.0, 0.0, 0.0, 0.0])?;
+
+    // Unfiltered: the three nearest, any kind.
+    println!("-- nearest, unfiltered --");
+    for hit in db.search(&query, 3)? {
+        println!("  id={} distance={:.4}", hit.id, hit.distance);
     }
+
+    // Filtered: only documents published in 2026 or later.
+    println!("-- nearest documents from 2026+ --");
+    let filter = Filter::and(vec![
+        Filter::eq("kind", Value::String("doc".into())),
+        Filter::gte("year", Value::Int(2026)),
+    ]);
+    for hit in db.search_with(&query, 3, filter)? {
+        println!("  id={} distance={:.4}", hit.id, hit.distance);
+    }
+
+    db.close()
 }

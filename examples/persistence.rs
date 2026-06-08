@@ -1,76 +1,60 @@
-//! Open a directory-backed `iqdb`, write a few records, close cleanly,
-//! reopen, and prove the records survived.
-//!
-//! Run with:
-//! ```sh
-//! cargo run --example persistence --release
-//! ```
-//!
-//! The example creates `./data/iqdb-persistence-demo/` under the
-//! current working directory and leaves it in place when done — feel
-//! free to `rm -rf` it once you have looked at the on-disk files.
+// Copyright 2026 James Gober. Licensed under Apache-2.0 OR MIT.
 
-use std::path::PathBuf;
+//! Three sessions against one durable, file-backed database, showing that
+//! state survives between process-like boundaries (each block opens, works,
+//! and closes a fresh handle to the same file).
+//!
+//! Run with `cargo run --example persistence`.
 
-use iqdb::{DistanceMetric, Iqdb, Payload, Record, RecordId, Result, Vector};
+use iqdb::{DistanceMetric, Iqdb, Result, Value, Vector, VectorId};
 
 fn main() -> Result<()> {
-    let dir: PathBuf = "./data/iqdb-persistence-demo".into();
+    // A scratch location under the OS temp dir; cleaned up at the end.
+    let dir = std::env::temp_dir().join("iqdb-persistence-example");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let path = dir.join("topics.iqdb");
 
-    println!("== Session 1: open, upsert, close ==");
+    // Session 1: create, write three records with a "topic" tag, close.
     {
-        let db = Iqdb::open(&dir)?;
-        println!("opened {dir:?} (len={})", db.len());
-
-        for (id, components, topic) in [
-            (1_u64, vec![1.0, 0.0, 0.0], "rust"),
-            (2, vec![0.99, 0.10, 0.0], "rust"),
-            (3, vec![0.0, 1.0, 0.0], "python"),
+        let db = Iqdb::open(&path, 3, DistanceMetric::Cosine)?;
+        for (id, vector, topic) in [
+            (1u64, [1.0, 0.0, 0.0], "rust"),
+            (2, [0.0, 1.0, 0.0], "databases"),
+            (3, [0.0, 0.0, 1.0], "vectors"),
         ] {
-            let mut payload = Payload::new();
-            let _ = payload.insert("topic", topic);
-            db.upsert(Record::with_payload(
-                RecordId::new(id),
-                Vector::new(components)?,
-                payload,
-            ))?;
+            let meta = [("topic".to_string(), Value::String(topic.to_string()))]
+                .into_iter()
+                .collect();
+            db.upsert(
+                VectorId::from(id),
+                Vector::new(vector.to_vec())?,
+                Some(meta),
+            )?;
         }
-        println!("upserted {} records", db.len());
-
         db.flush()?;
-        println!("flushed (WAL synced to durable storage)");
-
         db.close()?;
-        println!("closed (snapshot rewritten, WAL truncated)");
+        println!("session 1: wrote 3 records to {}", path.display());
     }
 
-    println!("\n== Session 2: reopen, verify, search ==");
+    // Session 2: reopen, confirm the data, search, delete one, close.
     {
-        let db = Iqdb::open(&dir)?;
-        println!("reopened {dir:?} (len={})", db.len());
-        assert_eq!(db.len(), 3, "all three records should survive close()");
-
-        let probe = Vector::new(vec![1.0, 0.0, 0.0])?;
-        let hits = db.search(&probe, 2, DistanceMetric::Cosine)?;
-        println!("nearest 2 to {:?}:", probe.as_slice());
-        for hit in &hits {
-            println!("  id={:<3} score={:>8.4}", hit.id.get(), hit.score);
-        }
-
-        // Delete one and close again; next open should reflect the delete.
-        let _ = db.delete(RecordId::new(3))?;
+        let db = Iqdb::open(&path, 3, DistanceMetric::Cosine)?;
+        println!("session 2: reopened with {} records", db.len());
+        let hits = db.search(&Vector::new(vec![1.0, 0.0, 0.0])?, 1)?;
+        println!("  nearest to [1,0,0]: id={}", hits[0].id);
+        db.delete(&VectorId::from(3u64))?;
         db.close()?;
     }
 
-    println!("\n== Session 3: confirm delete persisted ==");
+    // Session 3: reopen, confirm the delete persisted.
     {
-        let db = Iqdb::open(&dir)?;
-        println!("reopened {dir:?} (len={})", db.len());
-        assert_eq!(db.len(), 2);
-        assert!(db.get(RecordId::new(3))?.is_none());
+        let db = Iqdb::open(&path, 3, DistanceMetric::Cosine)?;
+        println!("session 3: now {} records", db.len());
+        assert!(db.get(&VectorId::from(3u64))?.is_none());
         db.close()?;
     }
 
-    println!("\nall sessions consistent");
+    let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }

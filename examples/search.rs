@@ -1,83 +1,43 @@
-//! Top-`k` similarity search walk-through.
+// Copyright 2026 James Gober. Licensed under Apache-2.0 OR MIT.
+
+//! Search variants: top-`k`, batch, and the effect of the distance metric.
 //!
-//! Builds a small in-memory store of labelled 2-D vectors, runs an
-//! unfiltered cosine search, then narrows the candidate set with a
-//! payload filter, then exercises the batch variant against three
-//! probes at once.
-//!
-//! Run with:
-//! ```sh
-//! cargo run --example search --release
-//! ```
+//! Run with `cargo run --example search`.
 
-use iqdb::{DistanceMetric, Iqdb, Payload, PayloadValue, Record, RecordId, Result, Vector};
+use iqdb::{DistanceMetric, Iqdb, Result, Vector, VectorId};
 
-fn main() -> Result<()> {
-    let db = Iqdb::open_in_memory();
-
-    // Three labelled embeddings.
-    db.upsert(record(1, [1.0, 0.0], "rust"))?;
-    db.upsert(record(2, [0.99, 0.10], "rust"))?;
-    db.upsert(record(3, [0.0, 1.0], "python"))?;
-    db.upsert(record(4, [0.71, 0.71], "go"))?;
-    db.upsert(record(5, [-1.0, 0.0], "rust"))?;
-
-    let probe = Vector::new(vec![1.0, 0.0])?;
-
-    println!("== Unfiltered cosine top-3 ==");
-    for hit in db.search(&probe, 3, DistanceMetric::Cosine)? {
-        let topic = hit
-            .payload
-            .as_ref()
-            .and_then(|p| p.get("topic"))
-            .and_then(PayloadValue::as_text)
-            .unwrap_or("?");
-        println!(
-            "  id={:<3} score={:>8.4}  topic={topic}",
-            hit.id.get(),
-            hit.score
-        );
-    }
-
-    println!("\n== Filtered to topic=rust ==");
-    let only_rust = db.search_with(&probe, 5, DistanceMetric::Cosine, |rec| {
-        rec.payload()
-            .and_then(|p| p.get("topic"))
-            .and_then(PayloadValue::as_text)
-            == Some("rust")
-    })?;
-    for hit in &only_rust {
-        let topic = hit
-            .payload
-            .as_ref()
-            .and_then(|p| p.get("topic"))
-            .and_then(PayloadValue::as_text)
-            .unwrap_or("?");
-        println!(
-            "  id={:<3} score={:>8.4}  topic={topic}",
-            hit.id.get(),
-            hit.score
-        );
-    }
-
-    println!("\n== Batch of three probes ==");
-    let probes = vec![
-        Vector::new(vec![1.0, 0.0])?,
-        Vector::new(vec![0.0, 1.0])?,
-        Vector::new(vec![-1.0, 0.0])?,
-    ];
-    let batches = db.search_batch(&probes, 1, DistanceMetric::Cosine)?;
-    for (probe, hits) in probes.iter().zip(batches.iter()) {
-        let nearest = hits.first().map(|h| h.id.get()).unwrap_or(0);
-        println!("  probe={:?} → nearest id={}", probe.as_slice(), nearest);
-    }
-
-    db.close()
+fn build(metric: DistanceMetric) -> Result<Iqdb> {
+    let db = Iqdb::open_in_memory(2, metric)?;
+    db.upsert(VectorId::from(1u64), Vector::new(vec![1.0, 0.0])?, None)?;
+    db.upsert(VectorId::from(2u64), Vector::new(vec![0.0, 1.0])?, None)?;
+    db.upsert(VectorId::from(3u64), Vector::new(vec![2.0, 0.0])?, None)?;
+    Ok(db)
 }
 
-fn record(id: u64, components: [f32; 2], topic: &str) -> Record {
-    let vector = Vector::new(components.to_vec()).expect("finite components");
-    let mut payload = Payload::new();
-    let _ = payload.insert("topic", topic);
-    Record::with_payload(RecordId::new(id), vector, payload)
+fn main() -> Result<()> {
+    // Cosine treats [1,0] and [2,0] as identical in direction, so both rank
+    // ahead of [0,1] for a query along the first axis.
+    let cosine = build(DistanceMetric::Cosine)?;
+    println!("-- cosine, top 3 --");
+    for hit in cosine.search(&Vector::new(vec![1.0, 0.0])?, 3)? {
+        println!("  id={} distance={:.4}", hit.id, hit.distance);
+    }
+
+    // Euclidean is magnitude-sensitive: [1,0] is closer to the query than
+    // [2,0], so the order differs from cosine.
+    let euclid = build(DistanceMetric::Euclidean)?;
+    println!("-- euclidean, top 3 --");
+    for hit in euclid.search(&Vector::new(vec![1.0, 0.0])?, 3)? {
+        println!("  id={} distance={:.4}", hit.id, hit.distance);
+    }
+
+    // Batch search runs one query list per input, in order.
+    let queries = vec![Vector::new(vec![1.0, 0.0])?, Vector::new(vec![0.0, 1.0])?];
+    println!("-- batch (cosine), top 1 each --");
+    for (i, hits) in cosine.search_batch(&queries, 1)?.into_iter().enumerate() {
+        println!("  query {i}: nearest id={}", hits[0].id);
+    }
+
+    cosine.close()?;
+    euclid.close()
 }

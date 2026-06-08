@@ -1,118 +1,54 @@
 // Copyright 2026 James Gober. Licensed under Apache-2.0 OR MIT.
 
-//! Error types for the `iqdb` crate.
+//! The unified `iqdb` error type.
 //!
-//! All fallible operations return [`Result<T>`] — an alias for
-//! `core::result::Result<T, Error>`. The [`Error`] type enumerates every
-//! failure mode the crate can produce. Error codes are reserved under the
-//! `IQERR-XXXXX` prefix in the wider Hive error registry.
+//! Every fallible operation on the public surface returns [`Result<T>`],
+//! whose error is the single [`Error`] enum. `iqdb` composes two upstream
+//! error vocabularies — [`iqdb_types::IqdbError`] for the index and
+//! vector-vocabulary layer, and [`iqdb_persist::PersistError`] for the
+//! durable-storage layer — and folds them into one `#[non_exhaustive]`
+//! type so callers match on a single surface. A third variant,
+//! [`Error::Config`], covers handle-level consistency checks that belong
+//! to neither layer (for example, a reopen whose requested `dim` / `metric`
+//! disagrees with the stored database).
+//!
+//! Every variant's [`Display`](fmt::Display) carries only static text or
+//! values the library itself produced — never echoed vector payloads — so
+//! an error string is safe to forward to a log sink.
 
 use core::fmt;
 
-/// Convenient `Result` alias where the error type is fixed to [`Error`].
-pub type Result<T> = core::result::Result<T, Error>;
+use iqdb_persist::PersistError;
+use iqdb_types::IqdbError;
 
-/// The top-level error type returned by every fallible operation in `iqdb`.
+/// An error from any `iqdb` operation.
 ///
-/// The enum is `#[non_exhaustive]`; new variants may be added in minor
-/// releases as new failure modes emerge. Callers must never write
-/// exhaustive `match` arms over `Error` — always include a `_` arm.
-#[derive(Debug)]
+/// The enum is `#[non_exhaustive]`: a `match` on it must include a wildcard
+/// arm, and future releases may add variants without that being a breaking
+/// change.
 #[non_exhaustive]
+#[derive(Debug)]
 pub enum Error {
-    /// A lower-level I/O failure occurred.
-    ///
-    /// Callers should inspect the wrapped `std::io::ErrorKind` and decide
-    /// whether retry, fallback, or surface-to-user behavior is appropriate.
-    Io(std::io::Error),
-
-    /// Invalid runtime configuration.
-    ///
-    /// This indicates programmer error when constructing the database.
-    InvalidConfig(&'static str),
-
-    /// A vector failed validation at the system boundary.
-    ///
-    /// The `reason` is a static string describing why the input was
-    /// rejected (empty vector, non-finite component, etc.). Validation
-    /// happens in [`Vector::new`](crate::Vector::new) and friends so
-    /// that downstream code can treat every constructed `Vector` as
-    /// known-good — no internal path needs to re-check.
-    InvalidVector {
-        /// Static description of why the vector was rejected. Never
-        /// contains user-supplied data, so it is safe to log.
-        reason: &'static str,
-    },
-
-    /// Two vectors with different dimensionality were combined.
-    ///
-    /// Returned by distance-metric computations and by store operations
-    /// that need to enforce a homogeneous schema. The `left` and
-    /// `right` fields carry the observed dimensions so callers can
-    /// surface an actionable message.
-    DimensionMismatch {
-        /// Dimensionality of the first vector in the offending pair.
-        left: usize,
-        /// Dimensionality of the second vector in the offending pair.
-        right: usize,
-    },
-
-    /// On-disk data was found to be corrupt during recovery.
-    ///
-    /// Surfaced by the file-backed store when the snapshot or WAL
-    /// fails an integrity check (bad magic header, unrecognised
-    /// version, CRC mismatch, truncated entry). The `reason` is a
-    /// static string identifying which check failed; the file path
-    /// is not embedded so log forwarding stays safe by default.
-    ///
-    /// Recovery behaviour: the file-backed store stops replaying at
-    /// the first corrupt entry. Records committed before the
-    /// corruption are still loaded; anything after is discarded.
-    Corrupt {
-        /// Static description of which integrity check failed.
-        reason: &'static str,
-    },
-
-    /// The requested operation is not yet implemented.
-    ///
-    /// Used by methods whose engine path lands in a later milestone
-    /// (currently `Iqdb::open(path)` and `Iqdb::flush` — both arrive
-    /// with the durable-storage substrate in v0.4.0). Letting these
-    /// stubs return a typed error rather than panicking lets callers
-    /// wire them now and gate behaviour on the variant.
-    NotImplemented,
-}
-
-impl Error {
-    /// Construct an [`Error::InvalidVector`] from a static reason string.
-    ///
-    /// Internal helper used by the vector constructors. Kept `pub(crate)`
-    /// so the surface of constructible reasons stays inside the crate.
-    pub(crate) const fn invalid_vector(reason: &'static str) -> Self {
-        Self::InvalidVector { reason }
-    }
-
-    /// Construct an [`Error::Corrupt`] from a static reason string.
-    ///
-    /// Internal helper used by the codec and the file-backed store
-    /// when an integrity check fails. Kept `pub(crate)` so the surface
-    /// of constructible reasons stays inside the crate.
-    pub(crate) const fn corrupt(reason: &'static str) -> Self {
-        Self::Corrupt { reason }
-    }
+    /// A failure from the index / vocabulary layer — a dimension mismatch,
+    /// an absent id, an invalid metric for the chosen index, and so on. See
+    /// [`iqdb_types::IqdbError`] for the full set of causes.
+    Index(IqdbError),
+    /// A failure from the durable-storage layer — snapshot or write-ahead-log
+    /// I/O, a corrupt or truncated on-disk file, a checksum mismatch, or an
+    /// unsupported compression feature. See [`iqdb_persist::PersistError`].
+    Persist(PersistError),
+    /// A handle-level configuration or consistency check failed. `reason` is
+    /// a short static description (for example, that a reopened database's
+    /// `dim` or `metric` does not match the value passed to `open`).
+    Config(&'static str),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io(err) => write!(f, "iqdb: io error ({})", err.kind()),
-            Self::InvalidConfig(msg) => write!(f, "iqdb: invalid configuration ({msg})"),
-            Self::InvalidVector { reason } => write!(f, "iqdb: invalid vector ({reason})"),
-            Self::DimensionMismatch { left, right } => {
-                write!(f, "iqdb: dimension mismatch (left={left}, right={right})")
-            }
-            Self::Corrupt { reason } => write!(f, "iqdb: corrupt store ({reason})"),
-            Self::NotImplemented => f.write_str("iqdb: not implemented"),
+            Self::Index(e) => write!(f, "{e}"),
+            Self::Persist(e) => write!(f, "{e}"),
+            Self::Config(reason) => write!(f, "invalid configuration: {reason}"),
         }
     }
 }
@@ -120,92 +56,90 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Io(err) => Some(err),
-            _ => None,
+            Self::Index(e) => Some(e),
+            Self::Persist(e) => Some(e),
+            Self::Config(_) => None,
         }
     }
 }
 
-impl From<std::io::Error> for Error {
-    fn from(value: std::io::Error) -> Self {
-        Self::Io(value)
+impl From<IqdbError> for Error {
+    fn from(value: IqdbError) -> Self {
+        Self::Index(value)
     }
 }
+
+impl From<PersistError> for Error {
+    fn from(value: PersistError) -> Self {
+        Self::Persist(value)
+    }
+}
+
+/// A specialized [`Result`](core::result::Result) whose error is [`Error`].
+///
+/// # Examples
+///
+/// ```
+/// use iqdb::{DistanceMetric, Iqdb, Result, Vector, VectorId};
+///
+/// fn run() -> Result<()> {
+///     let db = Iqdb::open_in_memory(3, DistanceMetric::Cosine)?;
+///     db.upsert(VectorId::from(1u64), Vector::new(vec![0.1, 0.2, 0.3])?, None)?;
+///     assert_eq!(db.len(), 1);
+///     Ok(())
+/// }
+/// # run().unwrap();
+/// ```
+pub type Result<T> = core::result::Result<T, Error>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn error_implements_std_error() {
-        fn assert_error<E: std::error::Error>() {}
-        assert_error::<Error>();
+    fn from_iqdb_error_wraps_in_index_variant() {
+        let err: Error = IqdbError::NotFound.into();
+        assert!(matches!(err, Error::Index(IqdbError::NotFound)));
     }
 
     #[test]
-    fn io_error_display_does_not_leak_payload() {
-        let err = Error::Io(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "secret",
+    fn from_persist_error_wraps_in_persist_variant() {
+        let err: Error = PersistError::Unsupported {
+            feature: "compression",
+            available_in: "the `zstd` cargo feature",
+        }
+        .into();
+        assert!(matches!(
+            err,
+            Error::Persist(PersistError::Unsupported { .. })
         ));
-        let msg = format!("{err}");
-        assert!(msg.contains("permission denied") || msg.contains("PermissionDenied"));
-        assert!(!msg.contains("secret"));
     }
 
     #[test]
-    fn invalid_config_display_is_stable() {
-        let msg = format!("{}", Error::InvalidConfig("bad path"));
-        assert!(msg.contains("invalid configuration"));
-        assert!(msg.contains("bad path"));
+    fn display_delegates_to_inner_index_error() {
+        let err = Error::Index(IqdbError::DimensionMismatch {
+            expected: 3,
+            found: 2,
+        });
+        assert_eq!(
+            err.to_string(),
+            "vector dimension mismatch: expected 3, found 2"
+        );
     }
 
     #[test]
-    fn invalid_vector_display_is_stable() {
-        let err = Error::invalid_vector("empty vector");
-        let msg = format!("{err}");
-        assert!(msg.contains("invalid vector"));
-        assert!(msg.contains("empty vector"));
+    fn display_config_variant_is_prefixed() {
+        let err = Error::Config("dim must be greater than zero");
+        assert_eq!(
+            err.to_string(),
+            "invalid configuration: dim must be greater than zero"
+        );
     }
 
     #[test]
-    fn dimension_mismatch_display_includes_both_dims() {
-        let msg = format!("{}", Error::DimensionMismatch { left: 4, right: 8 });
-        assert!(msg.contains("dimension mismatch"));
-        assert!(msg.contains("left=4"));
-        assert!(msg.contains("right=8"));
-    }
-
-    #[test]
-    fn corrupt_display_includes_reason() {
-        let err = Error::corrupt("bad magic");
-        let msg = format!("{err}");
-        assert!(msg.contains("corrupt store"));
-        assert!(msg.contains("bad magic"));
-    }
-
-    #[test]
-    fn not_implemented_display_is_stable() {
-        let msg = format!("{}", Error::NotImplemented);
-        assert!(msg.contains("not implemented"));
-    }
-
-    #[test]
-    fn from_io_maps_to_io_variant() {
-        let err: Error = std::io::Error::new(std::io::ErrorKind::NotFound, "missing").into();
-        assert!(matches!(err, Error::Io(_)));
-    }
-
-    #[test]
-    fn io_error_exposes_source() {
-        let inner = std::io::Error::other("x");
-        let err = Error::Io(inner);
-        assert!(std::error::Error::source(&err).is_some());
-    }
-
-    #[test]
-    fn non_io_variant_has_no_source() {
-        let err = Error::invalid_vector("empty vector");
-        assert!(std::error::Error::source(&err).is_none());
+    fn source_is_present_for_wrapped_errors_and_absent_for_config() {
+        use std::error::Error as _;
+        assert!(Error::Index(IqdbError::NotFound).source().is_some());
+        assert!(Error::Config("x").source().is_none());
     }
 }

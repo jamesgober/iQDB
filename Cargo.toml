@@ -1,7 +1,7 @@
 [package]
 name = "iqdb"
-version = "0.4.0"
-edition = "2021"
+version = "0.5.0"
+edition = "2024"
 rust-version = "1.87"
 readme = "README.md"
 license = "Apache-2.0 OR MIT"
@@ -10,7 +10,7 @@ authors = [
     "James Gober <me@jamesgober.com>"
 ]
 
-description = "Embedded vector database for Rust. Lock-free, allocation-free hot path; cross-platform similarity search."
+description = "Embedded vector database for Rust. Exact and approximate (HNSW/IVF) similarity search with durable storage, over the iqdb crate family."
 
 # crates.io accepts up to 5 keywords and up to 5 categories from the
 # published taxonomy.
@@ -23,39 +23,47 @@ repository = "https://github.com/jamesgober/iqdb"
 homepage = "https://github.com/jamesgober/iqdb"
 
 # Configuration for docs.rs — build with all features so the gated
-# `Serialize` / `Deserialize` impls appear in the rendered docs.
+# `serde` / compression impls appear in the rendered docs.
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-# `serde` is opt-in; enabling the `serde` feature derives
-# `Serialize` / `Deserialize` on `Vector`, `Payload`, `PayloadValue`,
-# `RecordId`, `Record`, and `DistanceMetric`. The default build pulls
-# zero runtime dependencies.
-serde = { version = "1", optional = true, features = ["derive"] }
-
-# Unix-only — used exclusively for the `fcntl(F_FULLFSYNC)` call on
-# macOS in `crate::platform::full_sync`. The bindings on every other
-# Unix platform reduce to a single `sync_all` call and do not touch
-# `libc`. On Windows, this dependency is not pulled at all.
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
+# The iqdb family. `iqdb` is the integration layer: it owns the public
+# handle and the durable row store, and composes the family for the
+# vocabulary, the index seam, the index implementations, durability,
+# and caching. Pinned to the published 1.0 line — never path deps, so
+# the standalone repo builds without its siblings checked out.
+iqdb-types = "1.0.0"      # shared vocabulary: Vector, VectorId, Metadata, Hit, Filter, ...
+iqdb-distance = "1.0.0"   # SIMD distance kernels behind DistanceMetric
+iqdb-index = "1.0.0"      # the Index / IndexCore search seam
+iqdb-filter = "1.0.0"     # declarative Filter evaluation
+iqdb-flat = "1.0.0"       # exact flat index (the recall ground truth)
+iqdb-hnsw = "1.0.0"       # graph approximate index
+iqdb-ivf = "1.0.0"        # clustered approximate index (IVF-Flat / IVF-PQ)
+iqdb-build = "1.0.0"      # bulk / parallel index construction
+iqdb-persist = "1.0.0"    # atomic snapshot + WAL durability
+iqdb-cache = "1.0.0"      # optional result-cache wrapper
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
+# Deterministic synthetic data for the recall and benchmark suites.
 fastrand = "2"
-# Round-trip tests for the optional `serde` feature.
-serde_json = "1"
-# Property-based tests for distance-metric and search-ranking invariants.
+# Property-based tests for ranking and durability round-trip invariants.
 # Pinned to 1.x; the v1 line is stable on MSRV 1.87.
 proptest = { version = "1", default-features = false, features = ["std"] }
 
 [features]
 default = []
-# Activates `serde::Serialize` / `serde::Deserialize` on the public
-# data types. Additive; the default build is unaffected.
-serde = ["dep:serde"]
+# Derive `serde::Serialize` / `Deserialize` on the public data types by
+# forwarding to the family `serde` features. Additive; the default
+# build is unaffected.
+serde = ["iqdb-types/serde", "iqdb-cache/serde", "iqdb-persist/serde"]
+# Rayon-backed parallel distance scan and parallel index build.
+parallel = ["iqdb-flat/parallel"]
+# Snapshot compression backends, forwarded to iqdb-persist.
+zstd = ["iqdb-persist/zstd"]
+lz4 = ["iqdb-persist/lz4"]
 
 [profile.release]
 opt-level = 3
@@ -70,7 +78,7 @@ lto = "fat"
 codegen-units = 1
 
 [[bench]]
-name = "vector_ops"
+name = "search"
 harness = false
 
 [[example]]
@@ -84,3 +92,6 @@ name = "search"
 
 [[example]]
 name = "persistence"
+
+[[example]]
+name = "index_selection"

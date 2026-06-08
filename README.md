@@ -30,10 +30,10 @@
         It targets the same operational shape as <code>sqlite</code> or <code>redb</code>: no daemon, no network hop, no separate runtime. Open a handle, write vectors, query nearest neighbours — all from inside your binary.
     </p>
     <p>
-        The engine is built against a <b>lock-free hot path</b>, <b>allocation-free steady state</b>, and a <b>cache-aware</b> on-disk layout. Approximate-nearest-neighbour indices, exact brute-force search, payload metadata, and durable journaling are all in scope. Indices and storage are pluggable so workloads can trade recall for latency without rewriting the surrounding application.
+        The engine is built against a <b>lock-free hot path</b>, <b>allocation-free steady state</b>, and a <b>cache-aware</b> on-disk layout. Exact brute-force search, approximate-nearest-neighbour indices (HNSW and IVF), payload metadata, declarative filters, and durable write-ahead-logged storage are all in scope. Indices and storage are pluggable, so workloads can trade recall for latency without rewriting the surrounding application.
     </p>
     <p>
-        Built for <b>cross-platform</b> deployment from day one — Linux, macOS, and Windows are first-class targets, with <code>io_uring</code> on Linux and atomic file replacement everywhere else. The async surface is opt-in: synchronous embedded use stays free of executor coupling, while applications already running on Tokio can drive the same engine without bridging.
+        Built for <b>cross-platform</b> deployment from day one — Linux, macOS, and Windows are first-class targets, with the strongest power-loss sync each platform offers and atomic file replacement everywhere.
     </p>
     <br>
     <hr>
@@ -41,7 +41,7 @@
         <strong>MSRV is 1.87+.</strong> The crate is dual-licensed under <code>Apache-2.0 OR MIT</code> at your option.
     </p>
     <blockquote>
-        <strong>0.4.0 ships durable file-backed storage.</strong> <code>Iqdb::open(path)</code> now opens or creates a directory-backed database with a snapshot file (<code>snap</code>) and a write-ahead log (<code>wal</code>). <code>Iqdb::flush</code> drives the WAL through the strongest sync primitive each platform offers (<code>F_FULLFSYNC</code> on macOS, <code>fsync(2)</code> on other Unix, <code>FlushFileBuffers</code> on Windows). <code>Iqdb::close</code> runs a compaction — writes a fresh snapshot, atomically replaces the old one, truncates the WAL. Recovery handles corrupted WAL tails by truncating to the last known-good offset. The v0.3.0 search and CRUD surface is unchanged; every method dispatches through an internal <code>Backend</code> enum so in-memory and file-backed paths share the same public API. The API is <b>unstable</b> until 1.0; see <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> for the release-by-release surface, and <a href="./docs/API.md"><code>docs/API.md</code></a> for the full reference.
+        <strong>0.5.0 re-platforms iQDB onto the iqdb crate family.</strong> The crate is now the integration layer that composes the family's shared vocabulary (<code>iqdb-types</code>), index seam (<code>iqdb-index</code>), exact and approximate indices (<code>iqdb-flat</code>, <code>iqdb-hnsw</code>, <code>iqdb-ivf</code>), durable storage (<code>iqdb-persist</code>), and an optional result cache (<code>iqdb-cache</code>). A database now fixes its dimensionality and distance metric at open time and routes searches through a selectable index — exact <code>Flat</code> by default, or approximate <code>Hnsw</code> / <code>Ivf</code> through <code>IqdbConfig</code>. This is a <b>breaking change</b> from the 0.4.x self-contained surface; the API is unstable until 1.0. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> for the release-by-release surface and <a href="./docs/API.md"><code>docs/API.md</code></a> for the full reference.
     </blockquote>
 </div>
 
@@ -54,12 +54,10 @@ iQDB is engineered against the <a href="./REPS.md">Rust Efficiency &amp; Perform
 
 - **Embedded by default** — no daemon, no socket, no separate process. The library opens a path and gets out of the way.
 - **Sub-millisecond queries** — exact and approximate search paths are budgeted in microseconds, not milliseconds, with the hot path measured under Criterion every release.
-- **Lock-free hot paths** — atomic reads on the query path; writers do not contend with concurrent readers.
-- **Allocation-free steady state** — buffers are pooled and reused. Per-query allocation is a design defect.
-- **Cache-aware layout** — vectors land contiguous in memory and on disk; index nodes are padded to the cache line.
-- **Pluggable indices** — flat, IVF, and HNSW share a common trait surface so callers can swap strategies without touching their query code.
-- **Pluggable storage** — durable file-backed storage, transient in-memory storage, and the org-default `storage-io` substrate are all addressable behind the same handle.
-- **Crash-safe writes** — the durable path uses write-ahead logging and atomic file replacement. A pulled power cord must never corrupt the index.
+- **Enum-dispatched hot paths** — the index seam dispatches through a closed `match`, never `dyn`, so the query loop sees a concrete index with no virtual indirection.
+- **Allocation-aware steady state** — vector payloads are shared as `Arc<[f32]>` between the authoritative store and the derived index, so a vector that lives in both costs one allocation, not two.
+- **Pluggable indices** — flat, IVF, and HNSW share the `iqdb-index` trait surface so callers swap strategies through `IqdbConfig` without touching their query code. Flat is the exact recall ground truth the approximate indices are measured against.
+- **Crash-safe writes** — the durable path uses write-ahead logging and atomic snapshot replacement. A pulled power cord must never corrupt the database.
 - **Tier-1 cross-platform** — Linux (x86_64, aarch64), macOS (x86_64, Apple Silicon), Windows (x86_64) all compile and pass the full test suite on every commit.
 
 <hr>
@@ -71,14 +69,13 @@ iQDB ships milestone-by-milestone. Each tag below corresponds to a published rel
 
 | Milestone | Status | Surface delivered |
 |-----------|--------|-------------------|
-| `v0.1.0` — scaffolding | shipped | Crate scaffolding, lifecycle handle (`open` / `open_in_memory` / `flush` / `close`), `Error` type, integration test, criterion harness, CI matrix on all three Tier-1 platforms. |
-| `v0.2.0` — vector primitives | shipped | `Vector` (validated f32 embeddings), `DistanceMetric` (L2 / Cosine / Dot), `Payload` & `PayloadValue` (typed metadata), `RecordId`, `Record`. In-memory store with thread-safe `upsert` / `get` / `delete` / `len` / `is_empty`. Optional `serde` feature. |
-| `v0.3.0` — search | shipped | `Iqdb::search` / `search_with` / `search_batch` / `search_batch_with` over the flat index. `SearchResult { id, score, payload }`. Monomorphic predicate filters. NaN-aware ranking with id tie-break. Property-based ranking tests via `proptest`. `docs/API.md` published. |
-| `v0.4.0` — durable storage | **current** | Directory-backed `Iqdb::open(path)`. Write-ahead log + snapshot. Cross-platform `full_sync` (`F_FULLFSYNC` on macOS, `fsync(2)` on other Unix, `FlushFileBuffers` on Windows). Atomic-replace snapshot compaction on `close`. Recovery handles corrupt WAL tails by truncating to last known-good offset. New `Error::Corrupt` variant. |
-| `v0.5.0` — approximate indices | planned | IVF and HNSW indices behind the same trait the flat index implements. Build-time index selection via the builder. |
-| `v0.6.0` — async surface | planned | `async`-feature-gated mirror of the public API. Driven by Tokio. Cancellation-safe. |
-| `v0.7.0` — collections | planned | Named collections / namespaces with per-collection metric and dimensionality. Collection-scoped iteration. |
-| `v1.0.0` — API freeze | planned | Frozen public API. SemVer guarantees. Full benchmark suite. Migration guide from 0.x. |
+| `v0.1.0` — scaffolding | shipped | Crate scaffolding, lifecycle handle, `Error` type, CI matrix on all three Tier-1 platforms. |
+| `v0.2.0` — vector primitives | shipped | Validated vectors, distance metrics, typed payloads, in-memory store with thread-safe CRUD. |
+| `v0.3.0` — search | shipped | Flat top-`k` search, filters, batch variants, NaN-aware ranking, property-based tests. |
+| `v0.4.0` — durable storage | shipped | Directory-backed store, snapshot + WAL, cross-platform sync, atomic compaction, corrupt-tail recovery. |
+| `v0.5.0` — family composition + approximate indices | **current** | Re-platformed onto the iqdb crate family. Re-exported vocabulary (`Vector`, `VectorId`, `Metadata`, `Value`, `Hit`, `Filter`, `DistanceMetric`). Selectable index — exact `Flat`, plus `Hnsw` and `Ivf` through `IqdbConfig`. Durable storage via `iqdb-persist`; optional result cache via `iqdb-cache`. Recall validated against the flat oracle. |
+| `v0.6.0` — async surface | planned | `async`-feature-gated mirror of the public API, driven by Tokio, cancellation-safe. |
+| `v1.0.0` — API freeze | planned | Frozen public API and on-disk format. SemVer guarantees. Full benchmark suite. |
 
 The per-release detail — what was added, what changed, and what was verified — lives in the [`CHANGELOG`](./CHANGELOG.md) and the per-version notes under [`docs/release/`](./docs/release/).
 
@@ -91,49 +88,39 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-iqdb = "0.4"
+iqdb = "0.5"
 ```
 
-Enable the optional `serde` feature to derive `Serialize` / `Deserialize` on every public data type:
+Optional features (all additive):
 
 ```toml
 [dependencies]
-iqdb = { version = "0.4", features = ["serde"] }
+iqdb = { version = "0.5", features = ["serde", "parallel", "zstd"] }
 ```
 
-iQDB compiles on stable Rust **1.87** and newer. The default build pulls one runtime dependency on Unix (`libc`, used exclusively for the macOS `F_FULLFSYNC` call) and zero on Windows; the `serde` feature additionally pulls `serde` itself.
+iQDB compiles on stable Rust **1.87** and newer. As of 0.5.0 it composes the published iqdb family crates (`iqdb-types`, `iqdb-index`, `iqdb-flat`, `iqdb-hnsw`, `iqdb-ivf`, `iqdb-build`, `iqdb-persist`, `iqdb-cache`, and their transitive dependencies); it is no longer a zero-dependency build.
 
 <hr>
 <br>
 
 ## Quick Start
 
-The `0.4.0` surface exposes the full embedded-DB lifecycle: typed vector primitives, the in-memory store, exact top-`k` similarity search, and **directory-backed durable storage**. Approximate indices (IVF, HNSW) in `v0.5.0` will sit alongside the flat kernel rather than replacing it — exact search remains the correctness baseline.
+A database fixes its dimensionality and distance metric at open time, then exposes a small surface: `upsert` / `get` / `delete` for records, `search` / `search_with` for queries.
 
 ```rust
-use iqdb::{DistanceMetric, Iqdb, Payload, Record, RecordId, Result, Vector};
+use iqdb::{DistanceMetric, Iqdb, Result, Vector, VectorId};
 
 fn main() -> Result<()> {
-    let db = Iqdb::open_in_memory();
+    // A 3-dimensional, in-memory database compared under cosine distance.
+    let db = Iqdb::open_in_memory(3, DistanceMetric::Cosine)?;
 
-    let mut meta = Payload::new();
-    meta.insert("kind", "doc");
+    db.upsert(VectorId::from(1u64), Vector::new(vec![1.0, 0.0, 0.0])?, None)?;
+    db.upsert(VectorId::from(2u64), Vector::new(vec![0.99, 0.10, 0.0])?, None)?;
 
-    db.upsert(Record::with_payload(
-        RecordId::new(1),
-        Vector::new(vec![1.0, 0.0, 0.0])?,
-        meta,
-    ))?;
-    db.upsert(Record::new(
-        RecordId::new(2),
-        Vector::new(vec![0.99, 0.10, 0.0])?,
-    ))?;
-
-    // Top-k similarity search. Results are sorted ascending under the
-    // smaller-is-closer rule; ties break on id for determinism.
-    let probe = Vector::new(vec![1.0, 0.0, 0.0])?;
-    let hits = db.search(&probe, 5, DistanceMetric::Cosine)?;
-    assert_eq!(hits.first().map(|h| h.id), Some(RecordId::new(1)));
+    // Top-k similarity search. Results are sorted nearest-first under the
+    // smaller-is-closer rule; ties break on insertion order for determinism.
+    let hits = db.search(&Vector::new(vec![1.0, 0.0, 0.0])?, 5)?;
+    assert_eq!(hits[0].id, VectorId::from(1u64));
 
     db.close()
 }
@@ -141,184 +128,155 @@ fn main() -> Result<()> {
 
 ### Filtered and batch search
 
-Filters are generic — the predicate monomorphises into the search loop, so there is no per-record dynamic dispatch. The smaller-is-closer convention holds across all three metrics; `Dot` returns `−(a · b)` so a single ordering rule covers L2, Cosine, and Dot.
+Filters are declarative [`Filter`] expressions evaluated against each record's [`Metadata`]. On the exact flat index the filter is applied before scoring, so the result is exact.
 
 ```rust
-use iqdb::{DistanceMetric, Iqdb, Payload, PayloadValue, Record, RecordId, Result, Vector};
+use iqdb::{DistanceMetric, Filter, Iqdb, Metadata, Result, Value, Vector, VectorId};
 
 fn main() -> Result<()> {
-    let db = Iqdb::open_in_memory();
+    let db = Iqdb::open_in_memory(2, DistanceMetric::Cosine)?;
 
-    let mut doc = Payload::new();
-    doc.insert("kind", "doc");
-    db.upsert(Record::with_payload(
-        RecordId::new(1),
-        Vector::new(vec![1.0, 0.0])?,
-        doc,
-    ))?;
+    let doc: Metadata = [("kind".to_string(), Value::String("doc".into()))]
+        .into_iter().collect();
+    let img: Metadata = [("kind".to_string(), Value::String("image".into()))]
+        .into_iter().collect();
+    db.upsert(VectorId::from(1u64), Vector::new(vec![1.0, 0.0])?, Some(doc))?;
+    db.upsert(VectorId::from(2u64), Vector::new(vec![0.99, 0.10])?, Some(img))?;
 
-    let mut image = Payload::new();
-    image.insert("kind", "image");
-    db.upsert(Record::with_payload(
-        RecordId::new(2),
-        Vector::new(vec![0.99, 0.10])?,
-        image,
-    ))?;
+    // Only documents, ranked by cosine distance.
+    let filter = Filter::eq("kind", Value::String("doc".into()));
+    let hits = db.search_with(&Vector::new(vec![1.0, 0.0])?, 5, filter)?;
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, VectorId::from(1u64));
 
-    let probe = Vector::new(vec![1.0, 0.0])?;
-
-    // Filter the candidate set before heap admission.
-    let docs_only = db.search_with(&probe, 5, DistanceMetric::Cosine, |rec| {
-        rec.payload()
-            .and_then(|p| p.get("kind"))
-            .and_then(PayloadValue::as_text)
-            == Some("doc")
-    })?;
-    assert_eq!(docs_only.len(), 1);
-    assert_eq!(docs_only[0].id, RecordId::new(1));
-
-    // Batch — one top-k result list per query, preserves input order.
-    let probes = vec![
-        Vector::new(vec![1.0, 0.0])?,
-        Vector::new(vec![0.0, 1.0])?,
-    ];
-    let batches = db.search_batch(&probes, 1, DistanceMetric::Cosine)?;
+    // Batch — one top-k result list per query, preserving input order.
+    let queries = vec![Vector::new(vec![1.0, 0.0])?, Vector::new(vec![0.0, 1.0])?];
+    let batches = db.search_batch(&queries, 1)?;
     assert_eq!(batches.len(), 2);
 
     Ok(())
 }
 ```
 
-### Directory-backed durable store
+### Choosing an index
 
-`Iqdb::open(path)` opens or creates a directory-backed database. The directory contains a snapshot file and a write-ahead log; records survive process restart. `flush` syncs the WAL to durable storage; `close` runs a compaction (snapshot rewrite + WAL truncate) so the next open is a single-file load with no replay.
+Tier 1 (`open_in_memory` / `open`) defaults to the exact flat index. Tier 2 (`open_in_memory_with` / `open_with`) takes an [`IqdbConfig`] that selects an approximate index and tunes it, and can attach a result cache.
 
-```rust,no_run
-use iqdb::{Iqdb, Record, RecordId, Result, Vector};
+```rust
+use iqdb::{CacheConfig, DistanceMetric, HnswConfig, IndexKind, Iqdb, IqdbConfig, Result};
 
 fn main() -> Result<()> {
-    // Open or create at the given path. If the path does not exist,
-    // it is created as a directory. Subsequent opens replay the WAL
-    // on top of the snapshot to reconstruct the in-memory state.
-    let db = Iqdb::open("./data/my-db")?;
+    let cfg = IqdbConfig::new(128, DistanceMetric::Cosine)
+        .index(IndexKind::Hnsw(HnswConfig::default().with_ef_search(96)))
+        .cache(CacheConfig::new().capacity(10_000));
+    let db = Iqdb::open_in_memory_with(cfg)?;
+    assert!(db.is_empty());
+    Ok(())
+}
+```
 
-    db.upsert(Record::new(
-        RecordId::new(1),
-        Vector::new(vec![0.1, 0.2, 0.3])?,
-    ))?;
+On the approximate indices the metadata filter is applied after graph / cluster traversal, so a highly selective filter can return fewer than `k` hits — widen the search (HNSW `filter_widen`, IVF `n_probes`) when that matters. IVF is trained lazily from the stored vectors on the first search; after many writes, `Iqdb::optimize` retrains its centroids.
 
-    // Drive the WAL to durable storage. Uses F_FULLFSYNC on macOS,
-    // fsync(2) on other Unix, FlushFileBuffers on Windows.
-    db.flush()?;
+### Durable, file-backed storage
 
-    // Compact: write a fresh snapshot, atomically replace the old one,
-    // truncate the WAL. The next Iqdb::open of the same path will load
-    // the snapshot in a single shot.
+`Iqdb::open(path, dim, metric)` opens or creates a durable database. The path is the snapshot file; a write-ahead log lives beside it. Acknowledged writes survive a crash; reopening replays the log onto the snapshot.
+
+```rust,no_run
+use iqdb::{DistanceMetric, Iqdb, Result, Vector, VectorId};
+
+fn main() -> Result<()> {
+    let db = Iqdb::open("./data/vectors.iqdb", 3, DistanceMetric::Cosine)?;
+    db.upsert(VectorId::from(1u64), Vector::new(vec![0.1, 0.2, 0.3])?, None)?;
+    db.flush()?; // compact: fold the WAL into a fresh snapshot
     db.close()
 }
 ```
 
-A corrupt WAL tail (from a prior crash) is truncated to the last known-good offset on open. A corrupt snapshot surfaces as `Error::Corrupt { reason }` — recovery from a checkpoint chain is a future-milestone concern.
+A reopen whose requested `dim` / `metric` disagrees with the stored database fails with `Error::Config`. The stored index kind is part of the database identity and is restored from the snapshot regardless of the kind requested on reopen.
 
 <hr>
 <br>
 
 ## API Overview
 
-The full API reference lives at [`docs/API.md`](./docs/API.md); the rustdoc-generated docs at [docs.rs/iqdb](https://docs.rs/iqdb) carry the same information in browseable form. The currently-stable items are:
+The full API reference lives at [`docs/API.md`](./docs/API.md); the rustdoc at [docs.rs/iqdb](https://docs.rs/iqdb) carries the same information in browseable form. The public surface:
 
-- [`Iqdb`](./src/db.rs) — the top-level database handle.
-  - `Iqdb::open(path)` — open or create a **directory-backed** durable database (snapshot + WAL). Replays the WAL on top of the snapshot during recovery and truncates corrupt tails.
-  - `Iqdb::open_in_memory()` — open an ephemeral instance backed entirely by RAM.
-  - `Iqdb::upsert(record)` — insert or replace a record. Idempotent.
-  - `Iqdb::get(id)` — look up by id. Returns `Ok(None)` when absent.
-  - `Iqdb::delete(id)` — remove by id. Returns whether the id was present.
-  - `Iqdb::len()` / `Iqdb::is_empty()` — store cardinality.
-  - `Iqdb::search(query, k, metric)` — exact top-`k` similarity search, no filter.
-  - `Iqdb::search_with(query, k, metric, filter)` — top-`k` with a per-record predicate. The filter monomorphises into the scan loop; no per-record dynamic dispatch.
-  - `Iqdb::search_batch(queries, k, metric)` / `search_batch_with(...)` — sequential batch variants. Preserves input order.
-  - `Iqdb::flush()` — sync the WAL to durable storage. `F_FULLFSYNC` on macOS, `fsync(2)` on other Unix, `FlushFileBuffers` on Windows. No-op for the in-memory backend.
-  - `Iqdb::close(self)` — close the handle. For the file backend, runs a compaction (snapshot rewrite + WAL truncate).
-- [`Vector`](./src/vector.rs) — owned, contiguous, validated f32 embedding. `Vector::new(Vec<f32>)` / `Vector::from_slice(&[f32])` validate at the system boundary (no empty vectors, no `NaN`, no infinity); `as_slice` / `dim` / `norm` / `norm_squared` are non-allocating.
-- [`DistanceMetric`](./src/vector.rs) — `L2`, `Cosine`, `Dot`. `metric.distance(a, b)` returns a `Result<f32>` under the smaller-is-closer convention; dimensional homogeneity is enforced.
-- [`Payload`](./src/payload.rs) — typed `BTreeMap<String, PayloadValue>` for metadata. Deterministic iteration order makes payloads stable across `serde` round-trips and test assertions.
-- [`PayloadValue`](./src/payload.rs) — `Null` / `Bool` / `Int` / `Float` / `Text` / `Bytes` / `Array` / nested `Object`. `From<T>` conversions cover the primitives.
-- [`RecordId`](./src/record.rs) — transparent newtype around `u64`. Cheap to copy, hash, and compare.
-- [`Record`](./src/record.rs) — `(id, vector, optional payload)` aggregate. `Record::new` / `Record::with_payload` are the two constructors; `into_parts` decomposes without a clone.
-- [`SearchResult`](./src/search.rs) — `{ id, score, payload }` returned by the search methods. Sorted ascending by `score`; ties broken on `id`; `NaN` scores sort to the tail.
-- [`Error`](./src/error.rs) — the unified error type. `#[non_exhaustive]`.
-- [`Result<T>`](./src/error.rs) — alias for `core::result::Result<T, Error>`.
+- [`Iqdb`](./src/handle.rs) — the database handle.
+  - `Iqdb::open_in_memory(dim, metric)` — an ephemeral, exact-flat database.
+  - `Iqdb::open_in_memory_with(config)` — an in-memory database from a full [`IqdbConfig`].
+  - `Iqdb::open(path, dim, metric)` / `Iqdb::open_with(path, config)` — a durable, file-backed database.
+  - `Iqdb::upsert(id, vector, metadata)` — insert or replace. Rejects a wrong-dimension vector at the boundary.
+  - `Iqdb::get(id)` — look up the stored vector and metadata. `Ok(None)` when absent.
+  - `Iqdb::delete(id)` — remove by id; returns whether it was present.
+  - `Iqdb::len()` / `Iqdb::is_empty()` — cardinality.
+  - `Iqdb::search(query, k)` — top-`k` similarity search under the database metric.
+  - `Iqdb::search_with(query, k, filter)` — top-`k` restricted by a metadata [`Filter`].
+  - `Iqdb::search_batch(...)` / `search_batch_with(...)` — order-preserving batch variants.
+  - `Iqdb::optimize()` — rebuild / retrain the approximate index over the current vectors.
+  - `Iqdb::cache_stats()` — cache hit/miss statistics, when a cache is configured.
+  - `Iqdb::flush()` — compact a file-backed store; no-op in memory.
+  - `Iqdb::close(self)` — final compaction, then release.
+- [`IqdbConfig`](./src/config.rs) — fluent construction config: `dim`, `metric`, an [`IndexKind`], and an optional [`CacheConfig`].
+- [`IndexKind`](./src/config.rs) — `Flat` (exact), `Hnsw(HnswConfig)`, `Ivf(IvfConfig)`.
+- [`HnswConfig`] / [`IvfConfig`] / [`CacheConfig`] — re-exported tuning structs for the approximate indices and the cache.
+- [`Vector`] / [`VectorId`] / [`Metadata`] / [`Value`] / [`Hit`] / [`Filter`] / [`DistanceMetric`] — the shared vocabulary, re-exported from `iqdb-types`.
+- [`Error`](./src/error.rs) / [`Result<T>`](./src/error.rs) — the unified error type (`#[non_exhaustive]`) and its `Result` alias.
+
+[`Filter`]: https://docs.rs/iqdb-types
+[`Metadata`]: https://docs.rs/iqdb-types
+[`Value`]: https://docs.rs/iqdb-types
+[`Vector`]: https://docs.rs/iqdb-types
+[`VectorId`]: https://docs.rs/iqdb-types
+[`Hit`]: https://docs.rs/iqdb-types
+[`DistanceMetric`]: https://docs.rs/iqdb-types
+[`HnswConfig`]: https://docs.rs/iqdb-hnsw
+[`IvfConfig`]: https://docs.rs/iqdb-ivf
+[`CacheConfig`]: https://docs.rs/iqdb-cache
+[`IqdbConfig`]: ./src/config.rs
+[`IndexKind`]: ./src/config.rs
 
 ### Error variants
 
 | Variant | Meaning | Recovery |
 |---------|---------|----------|
-| `Error::Io(std::io::Error)` | A lower-level I/O failure occurred — disk full, permission denied, missing path, etc. | Inspect the wrapped `ErrorKind`. Retry transient errors; surface permanent ones. |
-| `Error::InvalidConfig(&'static str)` | Configuration supplied at open time was invalid (e.g., the path exists but is not a directory). | Programmer error — fix the construction site. |
-| `Error::InvalidVector { reason }` | A vector failed boundary validation — empty, or contains `NaN` / ±∞. | Sanitise the input at the producer side; `Vector::new` rejects bad data before it enters the store. |
-| `Error::DimensionMismatch { left, right }` | A distance-metric or store operation combined two vectors of different dimensionality. | Enforce a homogeneous schema at the producer side or surface a typed error to the caller. |
-| `Error::Corrupt { reason }` | On-disk data failed an integrity check during recovery (bad magic, unknown version, CRC mismatch, truncated frame). | Surfaced by `Iqdb::open(path)`. WAL tails are auto-truncated; a corrupt snapshot fails the open. |
-| `Error::NotImplemented` | Reserved for methods that defer their implementation to a later milestone. No public v0.4.0 method returns this variant. | n/a |
+| `Error::Index(IqdbError)` | A failure from the index / vocabulary layer — dimension mismatch, absent id, invalid metric for the chosen index, malformed filter. | Inspect the wrapped [`iqdb_types::IqdbError`] kind and fix the construction or query site. |
+| `Error::Persist(PersistError)` | A failure from the durable-storage layer — snapshot / WAL I/O, a corrupt or truncated file, a checksum mismatch, or an unsupported compression feature. | Inspect the wrapped [`iqdb_persist::PersistError`]. A corrupt WAL tail is truncated automatically; a corrupt snapshot fails the open. |
+| `Error::Config(&'static str)` | A handle-level consistency check failed — most often a reopen whose `dim` / `metric` does not match the stored database. | Open with the values the database was created with. |
 
-The enum is `#[non_exhaustive]`. New variants will appear in minor releases as new failure modes emerge. Exhaustive `match` arms are a forward-compatibility hazard — always include `_`.
+The enum is `#[non_exhaustive]`; always include a `_` arm in a `match`.
 
 <hr>
 <br>
 
 ## Examples
 
-Self-contained examples live in [`examples/`](./examples) and are declared in `Cargo.toml`. Run them with `cargo run --example <name>`.
+Self-contained examples live in [`examples/`](./examples). Run them with `cargo run --example <name>`.
 
-- **Lifecycle (`basic`)** — open an in-memory instance, upsert a vector, read it back, close.
-  - File: [`examples/basic.rs`](./examples/basic.rs)
-  - Run:
-    ```sh
-    cargo run --example basic --release
-    ```
+- **`basic`** — open, upsert, get, search, delete. [`examples/basic.rs`](./examples/basic.rs)
+- **`in_memory_store`** — metadata, replace-on-upsert, and a metadata-filtered search. [`examples/in_memory_store.rs`](./examples/in_memory_store.rs)
+- **`search`** — top-`k`, batch, and the effect of the distance metric. [`examples/search.rs`](./examples/search.rs)
+- **`persistence`** — three sessions against one durable file, showing data survives reopen. [`examples/persistence.rs`](./examples/persistence.rs)
+- **`index_selection`** — flat vs HNSW vs IVF through `IqdbConfig`, plus a cache and `optimize`. [`examples/index_selection.rs`](./examples/index_selection.rs)
 
-- **In-memory store walk-through (`in_memory_store`)** — populate the store with three records (vectors + typed payloads), compare distances between them under L2 and cosine, then delete one.
-  - File: [`examples/in_memory_store.rs`](./examples/in_memory_store.rs)
-  - Run:
-    ```sh
-    cargo run --example in_memory_store --release
-    ```
-
-- **Top-`k` search (`search`)** — unfiltered cosine top-`k`, payload-filtered search, and batch search across three probes in one file.
-  - File: [`examples/search.rs`](./examples/search.rs)
-  - Run:
-    ```sh
-    cargo run --example search --release
-    ```
-
-- **Directory-backed persistence (`persistence`)** — open at a path, upsert records, close. Reopen, verify the records survived, run a search, delete one, close. Reopen a third time and confirm the delete persisted. Three sessions, all consistent against the same on-disk database.
-  - File: [`examples/persistence.rs`](./examples/persistence.rs)
-  - Run:
-    ```sh
-    cargo run --example persistence --release
-    ```
-
-Approximate-index examples land alongside their milestone (`v0.5.0`).
+```sh
+cargo run --example index_selection
+```
 
 <hr>
 <br>
 
 ## Benchmarks
 
-A criterion harness is wired in [`benches/vector_ops.rs`](./benches/vector_ops.rs). v0.4.0 ships five groups:
+A Criterion harness lives in [`benches/search.rs`](./benches/search.rs):
 
-- **`vector_new`** — construction-time validation cost across small / medium / large dimensionalities (32 / 128 / 1024).
-- **`distance`** — single-shot distance computation under each of the three [`DistanceMetric`](./src/vector.rs) variants at dim 128.
-- **`store`** — `upsert` and `get` throughput against a populated in-memory store at 1 000 records, dim 128.
-- **`search`** — flat top-`k` search at 1 000 and 10 000 records, dim 128. Three variants: unfiltered, payload-filtered (~50% pruning), and batch-of-4.
-- **`file_store`** — durable `upsert` + `flush` to a fresh on-disk database, and snapshot-only open with 1 000 records, dim 128.
-
-Run with:
+- **`flat/search_dim64_n1000_k10`** / **`hnsw/search_dim64_n1000_k10`** — top-`k` query throughput on the exact and approximate paths over 1 000 vectors at dim 64.
+- **`flat/upsert_dim64`** — write throughput building a fresh database.
 
 ```sh
-cargo bench --bench vector_ops
+cargo bench --bench search
 ```
 
-Criterion writes reports to `target/criterion/`. Approximate-index benches land with `v0.5.0`; CI will gate merges on a regression threshold once the benches are stable.
+Criterion writes reports to `target/criterion/`. A regression beyond the REPS threshold (5% on a tracked metric) blocks a release.
 
 <hr>
 <br>
@@ -329,27 +287,18 @@ Every public path has happy / error / edge-case coverage:
 
 - Unit tests live in `#[cfg(test)] mod tests` blocks inside each source file.
 - Integration tests live in [`tests/`](./tests):
-  - [`tests/in_memory.rs`](./tests/in_memory.rs) — CRUD surface plus `serde` round-trips behind a feature gate.
-  - [`tests/search.rs`](./tests/search.rs) — the four search entry points: top-`k` ordering, filter pruning, batch order, dimension-mismatch handling, payload preservation, concurrent readers.
-  - [`tests/persistence.rs`](./tests/persistence.rs) — full durable lifecycle: open / upsert / close / reopen, delete persistence, payload round-trip through compaction, WAL replay without close, file-path rejection, corrupt snapshot detection, corrupt WAL tail truncation, multi-cycle state preservation.
-  - [`tests/properties.rs`](./tests/properties.rs) — `proptest`-driven property tests for distance-metric algebra (symmetry, identity, range bounds), search-ranking invariants (length bound, ascending order, perfect-match presence, no-filter parity), and durable round-trip (open → upsert → close → reopen preserves record sets).
-  - [`tests/smoke.rs`](./tests/smoke.rs) — minimal lifecycle smoke check.
-- Doc tests run as part of `cargo test` and validate every `# Examples` block in the rustdoc.
+  - [`tests/persistence.rs`](./tests/persistence.rs) — durable lifecycle: open / upsert / close / reopen, delete and metadata persistence, WAL replay without close, dim/metric-mismatch rejection, IVF round-trip, multi-session accumulation.
+  - [`tests/properties.rs`](./tests/properties.rs) — `proptest`-driven invariants: flat ranking (sorted, bounded, unique) and the durable round-trip preserving arbitrary record sets.
+  - [`tests/recall.rs`](./tests/recall.rs) — recall@k of HNSW and IVF measured against the exact flat oracle on deterministic synthetic data.
+- Doc tests run as part of `cargo test` and validate every `# Examples` block.
 
 ```sh
-# Full test sweep (unit + integration + doc tests)
 cargo test
 cargo test --all-features
-
-# Documentation build with no warnings (matches CI gating)
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
-
-# Lint at the strict profile CI enforces
 cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --all-features -- -D warnings
-
-# Formatting check (no diffs)
 cargo fmt --all -- --check
 ```
 
@@ -364,13 +313,7 @@ cargo fmt --all -- --check
 - macOS (`x86_64-apple-darwin`, `aarch64-apple-darwin`)
 - Windows (`x86_64-pc-windows-msvc`)
 
-**Platform-specific paths** — the durable storage layer takes the strongest sync primitive each platform exposes:
-
-- **Linux** (and other Unix except macOS): `fsync(2)` via [`std::fs::File::sync_all`](https://doc.rust-lang.org/std/fs/struct.File.html#method.sync_all). Atomic snapshot replacement via `rename(2)`.
-- **macOS**: `fcntl(fd, F_FULLFSYNC, 0)` — direct `libc` call, the only platform that needs an escape hatch beyond `fsync` for true power-loss durability. Atomic snapshot replacement via `rename(2)`.
-- **Windows**: `FlushFileBuffers` via `std::fs::File::sync_all`. Atomic snapshot replacement via `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` (also via `std::fs::rename`).
-
-`io_uring` (Linux batched writes) and `mmap` (read-mostly indices) are on the v0.4.x / v0.5.0 roadmap behind feature flags; they are not on the default build. No platform is silently degraded — every fallback is explicit and documented inline at each `#[cfg]` boundary, per the REPS *Platform-Specific Code* rule.
+Durable storage is provided by `iqdb-persist`, which takes the strongest power-loss sync each platform offers and replaces snapshots atomically. The on-disk format is little-endian on every platform, so a database written on one architecture reads back identically on another.
 
 <hr>
 <br>
@@ -381,43 +324,36 @@ cargo fmt --all -- --check
 
 Feature flags are strictly additive (per REPS) — enabling any combination never removes or weakens existing functionality.
 
-| Feature       | Default | Available     | Description                                                          |
-|---------------|---------|---------------|----------------------------------------------------------------------|
-| `serde`       | off     | **shipping**  | Derives `Serialize` / `Deserialize` on every public data type.       |
-| `mmap`        | off     | planned v0.4.x | Memory-mapped read path for hot indices.                             |
-| `io-uring`    | off     | planned v0.4.x | Linux-only `io_uring` submission for batch writes.                   |
-| `async`       | off     | planned v0.6.0 | Tokio-driven async mirror of the public API.                         |
-| `full`        | off     | planned post-1.0 | All stable features in one switch.                                |
+| Feature    | Default | Description |
+|------------|---------|-------------|
+| `serde`    | off     | Derive `Serialize` / `Deserialize` on the public data types (forwards to the family `serde` features). |
+| `parallel` | off     | Rayon-backed parallel distance scan on the flat index (forwards to `iqdb-flat`). |
+| `zstd`     | off     | Zstandard snapshot compression (forwards to `iqdb-persist`). |
+| `lz4`      | off     | LZ4 snapshot compression (forwards to `iqdb-persist`). |
 
 ```toml
-iqdb = { version = "0.4", features = ["serde"] }
+iqdb = { version = "0.5", features = ["serde"] }
 ```
 
 ### Runtime configuration
 
-`Iqdb::open_in_memory()` takes no parameters; `Iqdb::open(path)` takes only the path. A builder (`IqdbBuilder`) for tunable open-time knobs (compaction threshold, WAL fsync cadence, page size) lands in a future milestone once enough knobs accumulate to justify the surface.
+`Iqdb::open_in_memory(dim, metric)` and `Iqdb::open(path, dim, metric)` cover the common case. Index selection, tuning, and caching are configured through the fluent [`IqdbConfig`](./src/config.rs) passed to the `_with` constructors.
 
 <hr>
 <br>
 
 ## Architecture
 
-The crate is split along strict module boundaries — each module owns one concern and exposes a single trait or type as its contract:
+The crate is the integration layer over the iqdb family; each module owns one concern:
 
-- `src/lib.rs` — crate root, lint profile, public re-exports.
-- `src/db.rs` — the [`Iqdb`](./src/db.rs) handle, dispatching through the internal `Backend` enum to the active store.
-- `src/backend.rs` — the `pub(crate)` `Backend { Memory, File }` enum; pattern-matched dispatch lets the search kernel work over either store with zero dynamic-dispatch cost.
-- `src/vector.rs` — the [`Vector`](./src/vector.rs) primitive and the [`DistanceMetric`](./src/vector.rs) dispatch.
-- `src/payload.rs` — the [`Payload`](./src/payload.rs) / [`PayloadValue`](./src/payload.rs) typed metadata layer.
-- `src/record.rs` — the [`RecordId`](./src/record.rs) / [`Record`](./src/record.rs) aggregate.
-- `src/search.rs` — the flat top-`k` search kernel and the [`SearchResult`](./src/search.rs) type.
-- `src/store.rs` — the crate-internal `MemoryStore` (the read/write engine behind `open_in_memory`).
-- `src/file_store.rs` — the crate-internal `FileStore` (snapshot + WAL behind `open(path)`).
-- `src/codec.rs` — the binary frame encoder / decoder used by the file store. Length-prefixed, CRC32-checked, little-endian throughout.
-- `src/platform.rs` — the cross-platform `full_sync` primitive (`F_FULLFSYNC` / `fsync` / `FlushFileBuffers`).
-- `src/error.rs` — the [`Error`](./src/error.rs) enum and `Result` alias.
-
-As milestones land, the tree grows along the same bounded-responsibility pattern (`index/` for IVF + HNSW, `async_impl.rs` for the Tokio surface). The boundary between layers is always a trait or a concrete type with a typed surface — concrete backend implementations are crate-internal and gated behind `pub(crate)`.
+- `src/lib.rs` — crate root, lint profile, vocabulary re-exports.
+- `src/handle.rs` — the [`Iqdb`](./src/handle.rs) handle and its `RwLock`-guarded in-memory / file-backed storage seam.
+- `src/config.rs` — the fluent [`IqdbConfig`](./src/config.rs) and the [`IndexKind`](./src/config.rs) union.
+- `src/error.rs` — the unified [`Error`](./src/error.rs) wrapping the family error vocabularies.
+- `src/engine/mod.rs` — `IqdbCore`, the owned engine that implements the `iqdb-index` and `iqdb-persist` traits over an authoritative row store plus a derived index.
+- `src/engine/store.rs` — the authoritative, insertion-ordered row store (the single source of truth for `len` and rebuilds).
+- `src/engine/index.rs` — `AnyIndex`, the closed enum over `FlatIndex` / `HnswIndex` / `IvfIndex` with the IVF training hooks.
+- `src/engine/codec.rs` — the little-endian on-disk payload codec inside the `iqdb-persist` frame.
 
 ### Compile-time guarantees
 
@@ -440,7 +376,7 @@ The crate root enables the strict REPS lint profile in [`src/lib.rs`](./src/lib.
 #![deny(clippy::undocumented_unsafe_blocks)]
 ```
 
-Test modules locally relax the `unwrap_used` / `expect_used` lints — the strict profile is for production library code, not assertion scaffolding inside `#[cfg(test)]` blocks.
+Test modules locally relax the `unwrap_used` / `expect_used` lints — the strict profile is for production library code, not assertion scaffolding inside `#[cfg(test)]` blocks. The crate contains no `unsafe` code.
 
 <hr>
 <br>
