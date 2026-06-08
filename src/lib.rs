@@ -35,6 +35,13 @@
 //! or to attach a [`CacheConfig`]. Flat is the recall ground truth that the
 //! approximate indices are measured against.
 //!
+//! ## Async
+//!
+//! Enable the `async` feature for `AsyncIqdb`, a Tokio adapter that mirrors
+//! the [`Iqdb`] surface and offloads each blocking call onto Tokio's blocking
+//! pool via `spawn_blocking`. The synchronous API and the default build are
+//! unchanged; no Tokio is pulled unless `async` is enabled.
+//!
 //! [`sqlite`]: https://www.sqlite.org/
 //! [`redb`]: https://crates.io/crates/redb
 //!
@@ -103,11 +110,16 @@
 )]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+#[cfg(feature = "async")]
+mod async_db;
 mod config;
 mod engine;
 mod error;
 mod handle;
 
+#[cfg(feature = "async")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
+pub use async_db::AsyncIqdb;
 pub use config::{CacheConfig, EvictionPolicy, HnswConfig, IndexKind, IqdbConfig, IvfConfig};
 pub use error::{Error, Result};
 pub use handle::Iqdb;

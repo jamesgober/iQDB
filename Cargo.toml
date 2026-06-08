@@ -1,6 +1,6 @@
 [package]
 name = "iqdb"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.87"
 readme = "README.md"
@@ -45,6 +45,12 @@ iqdb-build = "1.0.0"      # bulk / parallel index construction
 iqdb-persist = "1.0.0"    # atomic snapshot + WAL durability
 iqdb-cache = "1.0.0"      # optional result-cache wrapper
 
+# Async surface (opt-in via the `async` feature). The family is synchronous
+# by design, so the async API offloads each blocking call onto Tokio's
+# blocking pool via `spawn_blocking`. Only the `rt` feature is needed — the
+# caller brings their own runtime. Pulled only when `async` is enabled.
+tokio = { version = "1", optional = true, default-features = false, features = ["rt"] }
+
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
 # Deterministic synthetic data for the recall and benchmark suites.
@@ -52,6 +58,9 @@ fastrand = "2"
 # Property-based tests for ranking and durability round-trip invariants.
 # Pinned to 1.x; the v1 line is stable on MSRV 1.87.
 proptest = { version = "1", default-features = false, features = ["std"] }
+# A runtime + `#[tokio::test]` / `#[tokio::main]` for the async tests and
+# example. Unused unless the `async` feature is enabled.
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros"] }
 
 [features]
 default = []
@@ -64,6 +73,9 @@ parallel = ["iqdb-flat/parallel"]
 # Snapshot compression backends, forwarded to iqdb-persist.
 zstd = ["iqdb-persist/zstd"]
 lz4 = ["iqdb-persist/lz4"]
+# Tokio-driven async mirror of the public API (`AsyncIqdb`). Additive; the
+# default synchronous surface is unchanged.
+async = ["dep:tokio"]
 
 [profile.release]
 opt-level = 3
@@ -95,3 +107,7 @@ name = "persistence"
 
 [[example]]
 name = "index_selection"
+
+[[example]]
+name = "async_search"
+required-features = ["async"]

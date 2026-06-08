@@ -16,7 +16,7 @@
 </div>
 <br>
 
-This document is the canonical API reference for **iqdb v0.5.0**. Every public type, method, error variant, and feature flag is recorded here with parameter descriptions and at least one runnable example. The narrative companion is the [README](../README.md); the per-release notes live under [`docs/release/`](./release/).
+This document is the canonical API reference for **iqdb v0.6.0**. Every public type, method, error variant, and feature flag is recorded here with parameter descriptions and at least one runnable example. The narrative companion is the [README](../README.md); the per-release notes live under [`docs/release/`](./release/).
 
 As of v0.5.0, `iqdb` is the integration layer over the **iqdb crate family**. The vector vocabulary it exposes (`Vector`, `VectorId`, `Metadata`, `Value`, `Hit`, `Filter`, `DistanceMetric`, `SearchParams`) is re-exported from [`iqdb-types`](https://docs.rs/iqdb-types); the tuning structs `HnswConfig`, `IvfConfig`, and `CacheConfig` are re-exported from the respective family crates. They are documented here as part of iqdb's public surface, with links to the originating crate for the exhaustive reference.
 
@@ -27,6 +27,7 @@ As of v0.5.0, `iqdb` is the integration layer over the **iqdb crate family**. Th
 - [Error Handling](#error-handling)
 - [Public APIs](#public-apis)
   - [`Iqdb`](#iqdb)
+  - [`AsyncIqdb`](#asynciqdb)
   - [`IqdbConfig`](#iqdbconfig)
   - [`IndexKind`](#indexkind)
   - [`HnswConfig` / `IvfConfig`](#hnswconfig--ivfconfig)
@@ -219,6 +220,43 @@ db.upsert(VectorId::from(1u64), Vector::new(vec![0.1, 0.2, 0.3])?, None)?;
 db.flush()?;
 db.close()
 # }
+```
+
+### `AsyncIqdb`
+
+*Available with the `async` feature.* A Tokio adapter over [`Iqdb`](#iqdb). It holds an `Arc<Iqdb>` and runs each blocking operation on Tokio's blocking pool via `tokio::task::spawn_blocking`, so awaiting a search or a write never stalls the executor. The family is synchronous by design — a search is CPU-bound, a durable write is a blocking `fsync` — so `AsyncIqdb` is a thin adapter, not a re-implementation; the sync `Iqdb` remains the source of truth. It is `Clone` (shares the handle through the `Arc`), `Send`, and `Sync`. A panic in a blocking closure is re-raised on the awaiting task.
+
+The async methods mirror the sync surface; search and batch methods take their query **by value** (the work runs on another thread). Cheap accessors stay synchronous.
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `open_in_memory` | `async (dim, metric) -> Result<AsyncIqdb>` | In-memory, exact flat. |
+| `open_in_memory_with` | `async (config: IqdbConfig) -> Result<AsyncIqdb>` | In-memory from a config. |
+| `open` | `async <P: AsRef<Path>>(path, dim, metric) -> Result<AsyncIqdb>` | Durable; open runs on the blocking pool. |
+| `open_with` | `async <P: AsRef<Path>>(path, config) -> Result<AsyncIqdb>` | Durable from a config. |
+| `upsert` | `async (id: VectorId, vector: Vector, metadata: Option<Metadata>) -> Result<()>` | Insert or replace. |
+| `get` | `async (id: VectorId) -> Result<Option<(Vector, Option<Metadata>)>>` | Look up by id (taken by value). |
+| `delete` | `async (id: VectorId) -> Result<bool>` | Remove by id. |
+| `search` | `async (query: Vector, k: usize) -> Result<Vec<Hit>>` | Top-`k`. |
+| `search_with` | `async (query: Vector, k: usize, filter: Filter) -> Result<Vec<Hit>>` | Filtered top-`k`. |
+| `search_batch` / `search_batch_with` | `async (queries: Vec<Vector>, k, [filter]) -> Result<Vec<Vec<Hit>>>` | Batch variants. |
+| `optimize` | `async () -> Result<()>` | Rebuild / retrain the approximate index. |
+| `flush` | `async () -> Result<()>` | Compact a file-backed store. |
+| `close` | `async (self) -> Result<()>` | Final compaction, then release. |
+| `len` / `is_empty` / `dim` / `metric` / `cache_stats` | sync `(&self)` | Cheap accessors — no offload. |
+
+```rust
+# tokio::runtime::Runtime::new().unwrap().block_on(async {
+use iqdb::{AsyncIqdb, DistanceMetric, Vector, VectorId};
+
+let db = AsyncIqdb::open_in_memory(3, DistanceMetric::Cosine).await?;
+db.upsert(VectorId::from(1u64), Vector::new(vec![1.0, 0.0, 0.0])?, None).await?;
+
+let hits = db.search(Vector::new(vec![1.0, 0.0, 0.0])?, 1).await?;
+assert_eq!(hits[0].id, VectorId::from(1u64));
+db.close().await?;
+# Ok::<(), iqdb::Error>(())
+# }).unwrap();
 ```
 
 ### `IqdbConfig`
@@ -432,6 +470,7 @@ All feature flags are additive.
 | `parallel` | off | Rayon-backed parallel distance scan on the flat index (forwards to `iqdb-flat`). |
 | `zstd` | off | Zstandard snapshot compression (forwards to `iqdb-persist`). |
 | `lz4` | off | LZ4 snapshot compression (forwards to `iqdb-persist`). |
+| `async` | off | Tokio-driven [`AsyncIqdb`](#asynciqdb) mirror of the public API; pulls `tokio` (only the `rt` feature). |
 
 ## Behavioural Notes
 

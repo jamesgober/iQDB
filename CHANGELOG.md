@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-06-08
+
+v0.6.0 adds an opt-in **async surface**. It is purely additive — the default build and the entire synchronous API are unchanged, and no Tokio dependency is pulled unless the `async` feature is enabled.
+
+### Added
+
+- `async` Cargo feature and [`AsyncIqdb`](./src/async_db.rs) — a Tokio adapter over [`Iqdb`](./src/handle.rs). It holds an `Arc<Iqdb>` and runs each blocking operation on Tokio's blocking pool via `tokio::task::spawn_blocking`, so awaiting a search or a write never stalls the executor. The family is synchronous by design (a search is CPU-bound, a durable write is a blocking `fsync`), so this is a thin adapter, not a re-implementation — the sync `Iqdb` remains the source of truth.
+  - Async mirror of the public surface: `open_in_memory` / `open_in_memory_with` / `open` / `open_with`, `upsert`, `get`, `delete`, `search`, `search_with`, `search_batch`, `search_batch_with`, `optimize`, `flush`, `close`. Search and batch methods take their query by value (the work runs on another thread).
+  - Cheap, non-blocking accessors (`len`, `is_empty`, `dim`, `metric`, `cache_stats`) stay synchronous.
+  - `AsyncIqdb` is `Clone` (shares the handle through the `Arc`), `Send`, and `Sync`. A panic in a blocking closure is re-raised on the awaiting task rather than swallowed.
+- New `async_search` example (`cargo run --example async_search --features async`) showing concurrent searches fanned out across tasks.
+- Async integration tests at [`tests/async_ops.rs`](./tests/async_ops.rs) — durable round-trip, reopen dim-mismatch rejection, and concurrent searches on a multi-thread runtime.
+
+### Changed
+
+- Version bumped to 0.6.0. The synchronous API is unchanged; this release is additive.
+
 ## [0.5.0] — 2026-06-08
 
 v0.5.0 re-platforms `iqdb` from a self-contained crate onto the **iqdb crate family**. `iqdb` is now the integration layer that composes the family for its vocabulary, index seam, index implementations, durability, and caching. This is a **breaking change**: the entire public surface moves to the family vocabulary, and a database now fixes its dimensionality and distance metric at open time. The crate is pre-1.0, so the break is permitted under SemVer.
@@ -87,7 +104,8 @@ v0.5.0 re-platforms `iqdb` from a self-contained crate onto the **iqdb crate fam
 
 Nothing removed in v0.4.0 — the surface is additive on top of v0.3.0. The `Error::NotImplemented` variant remains in the public API (still `#[non_exhaustive]`) so future-milestone wiring patterns can continue to use it.
 
-[Unreleased]: https://github.com/jamesgober/iqdb/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/jamesgober/iqdb/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/jamesgober/iqdb/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jamesgober/iqdb/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jamesgober/iqdb/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jamesgober/iqdb/compare/v0.2.0...v0.3.0

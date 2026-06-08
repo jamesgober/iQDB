@@ -41,7 +41,7 @@
         <strong>MSRV is 1.87+.</strong> The crate is dual-licensed under <code>Apache-2.0 OR MIT</code> at your option.
     </p>
     <blockquote>
-        <strong>0.5.0 re-platforms iQDB onto the iqdb crate family.</strong> The crate is now the integration layer that composes the family's shared vocabulary (<code>iqdb-types</code>), index seam (<code>iqdb-index</code>), exact and approximate indices (<code>iqdb-flat</code>, <code>iqdb-hnsw</code>, <code>iqdb-ivf</code>), durable storage (<code>iqdb-persist</code>), and an optional result cache (<code>iqdb-cache</code>). A database now fixes its dimensionality and distance metric at open time and routes searches through a selectable index — exact <code>Flat</code> by default, or approximate <code>Hnsw</code> / <code>Ivf</code> through <code>IqdbConfig</code>. This is a <b>breaking change</b> from the 0.4.x self-contained surface; the API is unstable until 1.0. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> for the release-by-release surface and <a href="./docs/API.md"><code>docs/API.md</code></a> for the full reference.
+        <strong>0.5.0 re-platforms iQDB onto the iqdb crate family.</strong> The crate is now the integration layer that composes the family's shared vocabulary (<code>iqdb-types</code>), index seam (<code>iqdb-index</code>), exact and approximate indices (<code>iqdb-flat</code>, <code>iqdb-hnsw</code>, <code>iqdb-ivf</code>), durable storage (<code>iqdb-persist</code>), and an optional result cache (<code>iqdb-cache</code>). A database now fixes its dimensionality and distance metric at open time and routes searches through a selectable index — exact <code>Flat</code> by default, or approximate <code>Hnsw</code> / <code>Ivf</code> through <code>IqdbConfig</code>. This is a <b>breaking change</b> from the 0.4.x self-contained surface; the API is unstable until 1.0. <strong>0.6.0</strong> adds an opt-in async surface (<code>AsyncIqdb</code>) behind the <code>async</code> feature; the synchronous API is unchanged. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> for the release-by-release surface and <a href="./docs/API.md"><code>docs/API.md</code></a> for the full reference.
     </blockquote>
 </div>
 
@@ -73,8 +73,8 @@ iQDB ships milestone-by-milestone. Each tag below corresponds to a published rel
 | `v0.2.0` — vector primitives | shipped | Validated vectors, distance metrics, typed payloads, in-memory store with thread-safe CRUD. |
 | `v0.3.0` — search | shipped | Flat top-`k` search, filters, batch variants, NaN-aware ranking, property-based tests. |
 | `v0.4.0` — durable storage | shipped | Directory-backed store, snapshot + WAL, cross-platform sync, atomic compaction, corrupt-tail recovery. |
-| `v0.5.0` — family composition + approximate indices | **current** | Re-platformed onto the iqdb crate family. Re-exported vocabulary (`Vector`, `VectorId`, `Metadata`, `Value`, `Hit`, `Filter`, `DistanceMetric`). Selectable index — exact `Flat`, plus `Hnsw` and `Ivf` through `IqdbConfig`. Durable storage via `iqdb-persist`; optional result cache via `iqdb-cache`. Recall validated against the flat oracle. |
-| `v0.6.0` — async surface | planned | `async`-feature-gated mirror of the public API, driven by Tokio, cancellation-safe. |
+| `v0.5.0` — family composition + approximate indices | shipped | Re-platformed onto the iqdb crate family. Re-exported vocabulary (`Vector`, `VectorId`, `Metadata`, `Value`, `Hit`, `Filter`, `DistanceMetric`). Selectable index — exact `Flat`, plus `Hnsw` and `Ivf` through `IqdbConfig`. Durable storage via `iqdb-persist`; optional result cache via `iqdb-cache`. Recall validated against the flat oracle. |
+| `v0.6.0` — async surface | **current** | `async`-feature-gated `AsyncIqdb`: a Tokio adapter that offloads each blocking call via `spawn_blocking`. Additive; the synchronous API and default build are unchanged. |
 | `v1.0.0` — API freeze | planned | Frozen public API and on-disk format. SemVer guarantees. Full benchmark suite. |
 
 The per-release detail — what was added, what changed, and what was verified — lives in the [`CHANGELOG`](./CHANGELOG.md) and the per-version notes under [`docs/release/`](./docs/release/).
@@ -194,6 +194,24 @@ fn main() -> Result<()> {
 
 A reopen whose requested `dim` / `metric` disagrees with the stored database fails with `Error::Config`. The stored index kind is part of the database identity and is restored from the snapshot regardless of the kind requested on reopen.
 
+### Async (the `async` feature)
+
+The family is synchronous by design, so the async surface is a thin Tokio adapter: `AsyncIqdb` holds an `Arc<Iqdb>` and runs each blocking call on Tokio's blocking pool via `spawn_blocking`, so awaiting a search or a write never stalls the executor. It is `Clone` + `Send` + `Sync`. Enable the `async` feature and bring your own runtime.
+
+```rust,ignore
+use iqdb::{AsyncIqdb, DistanceMetric, Result, Vector, VectorId};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let db = AsyncIqdb::open_in_memory(3, DistanceMetric::Cosine).await?;
+    db.upsert(VectorId::from(1u64), Vector::new(vec![1.0, 0.0, 0.0])?, None).await?;
+
+    let hits = db.search(Vector::new(vec![1.0, 0.0, 0.0])?, 1).await?;
+    assert_eq!(hits[0].id, VectorId::from(1u64));
+    db.close().await
+}
+```
+
 <hr>
 <br>
 
@@ -216,6 +234,7 @@ The full API reference lives at [`docs/API.md`](./docs/API.md); the rustdoc at [
   - `Iqdb::cache_stats()` — cache hit/miss statistics, when a cache is configured.
   - `Iqdb::flush()` — compact a file-backed store; no-op in memory.
   - `Iqdb::close(self)` — final compaction, then release.
+- [`AsyncIqdb`](./src/async_db.rs) — *(`async` feature)* a Tokio adapter mirroring the `Iqdb` surface; offloads each blocking call via `spawn_blocking`. `Clone` + `Send` + `Sync`.
 - [`IqdbConfig`](./src/config.rs) — fluent construction config: `dim`, `metric`, an [`IndexKind`], and an optional [`CacheConfig`].
 - [`IndexKind`](./src/config.rs) — `Flat` (exact), `Hnsw(HnswConfig)`, `Ivf(IvfConfig)`.
 - [`HnswConfig`] / [`IvfConfig`] / [`CacheConfig`] — re-exported tuning structs for the approximate indices and the cache.
@@ -257,9 +276,11 @@ Self-contained examples live in [`examples/`](./examples). Run them with `cargo 
 - **`search`** — top-`k`, batch, and the effect of the distance metric. [`examples/search.rs`](./examples/search.rs)
 - **`persistence`** — three sessions against one durable file, showing data survives reopen. [`examples/persistence.rs`](./examples/persistence.rs)
 - **`index_selection`** — flat vs HNSW vs IVF through `IqdbConfig`, plus a cache and `optimize`. [`examples/index_selection.rs`](./examples/index_selection.rs)
+- **`async_search`** *(`async` feature)* — concurrent searches fanned out across Tokio tasks. [`examples/async_search.rs`](./examples/async_search.rs)
 
 ```sh
 cargo run --example index_selection
+cargo run --example async_search --features async
 ```
 
 <hr>
@@ -330,6 +351,7 @@ Feature flags are strictly additive (per REPS) — enabling any combination neve
 | `parallel` | off     | Rayon-backed parallel distance scan on the flat index (forwards to `iqdb-flat`). |
 | `zstd`     | off     | Zstandard snapshot compression (forwards to `iqdb-persist`). |
 | `lz4`      | off     | LZ4 snapshot compression (forwards to `iqdb-persist`). |
+| `async`    | off     | Tokio-driven `AsyncIqdb` mirror of the public API. Pulls `tokio` (only the `rt` feature). |
 
 ```toml
 iqdb = { version = "0.5", features = ["serde"] }
