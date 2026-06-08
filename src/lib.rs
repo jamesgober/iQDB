@@ -120,7 +120,10 @@ mod handle;
 #[cfg(feature = "async")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 pub use async_db::AsyncIqdb;
-pub use config::{CacheConfig, EvictionPolicy, HnswConfig, IndexKind, IqdbConfig, IvfConfig};
+pub use config::{
+    CacheConfig, Compression, EvictionPolicy, FsyncPolicy, HnswConfig, IndexKind, IqdbConfig,
+    IvfConfig,
+};
 pub use error::{Error, Result};
 pub use handle::Iqdb;
 

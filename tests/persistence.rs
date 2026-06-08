@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use iqdb::{
-    DistanceMetric, IndexKind, Iqdb, IqdbConfig, IvfConfig, Metadata, Value, Vector, VectorId,
+    Compression, DistanceMetric, FsyncPolicy, IndexKind, Iqdb, IqdbConfig, IvfConfig, Metadata,
+    Value, Vector, VectorId,
 };
 
 /// A unique temp directory holding one database file, removed on drop.
@@ -233,6 +234,62 @@ fn multiple_sessions_accumulate() {
 
     let db = Iqdb::open(&path, 1, DistanceMetric::Euclidean).unwrap();
     assert_eq!(db.len(), 5);
+}
+
+#[test]
+fn round_trip_with_relaxed_fsync_policy() {
+    let tmp = TempDb::new();
+    let path = tmp.path();
+    let cfg = IqdbConfig::new(2, DistanceMetric::Cosine).fsync(FsyncPolicy::Never);
+
+    {
+        let db = Iqdb::open_with(&path, cfg).unwrap();
+        db.upsert(VectorId::from(1u64), v(&[1.0, 0.0]), None)
+            .unwrap();
+        db.upsert(VectorId::from(2u64), v(&[0.0, 1.0]), None)
+            .unwrap();
+        // A clean close compacts to a snapshot, so even FsyncPolicy::Never
+        // leaves a recoverable database.
+        db.close().unwrap();
+    }
+
+    let db = Iqdb::open(&path, 2, DistanceMetric::Cosine).unwrap();
+    assert_eq!(db.len(), 2);
+    assert!(db.get(&VectorId::from(1u64)).unwrap().is_some());
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn zstd_compressed_round_trip() {
+    let tmp = TempDb::new();
+    let path = tmp.path();
+    let cfg =
+        IqdbConfig::new(2, DistanceMetric::Cosine).compression(Compression::Zstd { level: 3 });
+
+    {
+        let db = Iqdb::open_with(&path, cfg).unwrap();
+        for i in 0..32u64 {
+            db.upsert(VectorId::from(i), v(&[i as f32, 0.0]), None)
+                .unwrap();
+        }
+        db.close().unwrap();
+    }
+
+    let db = Iqdb::open(&path, 2, DistanceMetric::Cosine).unwrap();
+    assert_eq!(db.len(), 32);
+    let (got, _) = db.get(&VectorId::from(7u64)).unwrap().expect("present");
+    assert_eq!(got.as_slice(), &[7.0, 0.0]);
+}
+
+#[cfg(not(feature = "zstd"))]
+#[test]
+fn zstd_compression_without_feature_is_rejected() {
+    let tmp = TempDb::new();
+    let path = tmp.path();
+    let cfg =
+        IqdbConfig::new(2, DistanceMetric::Cosine).compression(Compression::Zstd { level: 3 });
+    let err = Iqdb::open_with(&path, cfg).unwrap_err();
+    assert!(matches!(err, iqdb::Error::Persist(_)), "got {err:?}");
 }
 
 #[test]

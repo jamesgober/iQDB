@@ -151,7 +151,8 @@ impl Iqdb {
     /// assert!(db.is_empty());
     /// ```
     pub fn open_in_memory_with(config: IqdbConfig) -> Result<Self> {
-        let (dim, metric, core_cfg) = config.into_parts();
+        // The in-memory backend ignores durability tuning (nothing to sync).
+        let (dim, metric, core_cfg, _durability) = config.into_parts();
         Self::require_nonzero_dim(dim)?;
         let core = IqdbCore::new(dim, metric, core_cfg)?;
         Ok(Self {
@@ -199,12 +200,14 @@ impl Iqdb {
     ///
     /// See [`Iqdb::open`].
     pub fn open_with<P: AsRef<Path>>(path: P, config: IqdbConfig) -> Result<Self> {
-        let (dim, metric, core_cfg) = config.into_parts();
+        let (dim, metric, core_cfg, durability) = config.into_parts();
         Self::require_nonzero_dim(dim)?;
         let cache = core_cfg.cache.clone();
         let path = path.as_ref().to_path_buf();
         let mut persist_cfg = PersistConfig::new(path.clone());
         persist_cfg.wal_enabled = true;
+        persist_cfg.fsync_policy = durability.fsync;
+        persist_cfg.compression = durability.compression;
 
         let storage = if path.exists() {
             let mut persisted = PersistedIndex::<IqdbCore>::load(persist_cfg)?;

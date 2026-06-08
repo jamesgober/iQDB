@@ -32,6 +32,7 @@ use iqdb_types::DistanceMetric;
 pub use iqdb_cache::{CacheConfig, EvictionPolicy};
 pub use iqdb_hnsw::HnswConfig;
 pub use iqdb_ivf::IvfConfig;
+pub use iqdb_persist::{Compression, FsyncPolicy};
 
 /// Which index implementation backs an [`Iqdb`](crate::Iqdb) handle.
 ///
@@ -90,6 +91,24 @@ pub(crate) struct CoreConfig {
     pub(crate) cache: Option<CacheConfig>,
 }
 
+/// Durable-storage tuning for the file-backed path. Ignored by the in-memory
+/// backend (there is nothing to sync or compress). Defaults to the safest
+/// point: fsync every acknowledged write, no compression.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Durability {
+    pub(crate) fsync: FsyncPolicy,
+    pub(crate) compression: Compression,
+}
+
+impl Default for Durability {
+    fn default() -> Self {
+        Self {
+            fsync: FsyncPolicy::Always,
+            compression: Compression::None,
+        }
+    }
+}
+
 /// Construction-time configuration for an [`Iqdb`](crate::Iqdb) handle.
 ///
 /// Build one with [`IqdbConfig::new`] and chain the optional overrides. Pass
@@ -113,6 +132,7 @@ pub struct IqdbConfig {
     dim: usize,
     metric: DistanceMetric,
     core: CoreConfig,
+    durability: Durability,
 }
 
 impl IqdbConfig {
@@ -134,6 +154,7 @@ impl IqdbConfig {
             dim,
             metric,
             core: CoreConfig::default(),
+            durability: Durability::default(),
         }
     }
 
@@ -172,6 +193,53 @@ impl IqdbConfig {
         self
     }
 
+    /// Set the write-ahead-log fsync cadence for the durable, file-backed
+    /// path. Ignored by an in-memory database.
+    ///
+    /// The default, [`FsyncPolicy::Always`], makes every acknowledged write
+    /// durable before it returns. [`FsyncPolicy::Periodic`] bounds the
+    /// un-synced window for throughput; [`FsyncPolicy::Never`] is for tests
+    /// and tmpfs-backed paths only.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use iqdb::{DistanceMetric, FsyncPolicy, IqdbConfig};
+    /// use std::time::Duration;
+    ///
+    /// let cfg = IqdbConfig::new(16, DistanceMetric::Cosine)
+    ///     .fsync(FsyncPolicy::Periodic(Duration::from_millis(50)));
+    /// # let _ = cfg;
+    /// ```
+    #[must_use]
+    pub fn fsync(mut self, policy: FsyncPolicy) -> Self {
+        self.durability.fsync = policy;
+        self
+    }
+
+    /// Set the snapshot compression for the durable, file-backed path.
+    /// Ignored by an in-memory database.
+    ///
+    /// [`Compression::Zstd`] and [`Compression::Lz4`] require the matching
+    /// `zstd` / `lz4` cargo feature; opening with one whose feature is not
+    /// compiled in fails with [`Error::Persist`](crate::Error::Persist).
+    /// The default is [`Compression::None`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use iqdb::{Compression, DistanceMetric, IqdbConfig};
+    ///
+    /// let cfg = IqdbConfig::new(16, DistanceMetric::Cosine)
+    ///     .compression(Compression::Zstd { level: 3 });
+    /// # let _ = cfg;
+    /// ```
+    #[must_use]
+    pub fn compression(mut self, compression: Compression) -> Self {
+        self.durability.compression = compression;
+        self
+    }
+
     /// The configured dimensionality.
     #[must_use]
     pub fn dim(&self) -> usize {
@@ -196,10 +264,10 @@ impl IqdbConfig {
         self.core.cache.is_some()
     }
 
-    /// Decompose into the `(dim, metric, core)` triple the handle hands to
-    /// the internal core constructor.
-    pub(crate) fn into_parts(self) -> (usize, DistanceMetric, CoreConfig) {
-        (self.dim, self.metric, self.core)
+    /// Decompose into the parts the handle hands to the core constructor and
+    /// the durable-storage layer.
+    pub(crate) fn into_parts(self) -> (usize, DistanceMetric, CoreConfig, Durability) {
+        (self.dim, self.metric, self.core, self.durability)
     }
 }
 
@@ -231,13 +299,25 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_flat_and_uncached() {
+    fn defaults_are_flat_uncached_and_safely_durable() {
         let cfg = IqdbConfig::new(4, DistanceMetric::Euclidean);
         assert!(!cfg.is_cached());
         assert_eq!(cfg.index_kind(), IndexKind::Flat);
-        let (dim, metric, core) = cfg.into_parts();
+        let (dim, metric, core, durability) = cfg.into_parts();
         assert_eq!(dim, 4);
         assert_eq!(metric, DistanceMetric::Euclidean);
         assert!(core.cache.is_none());
+        assert_eq!(durability.fsync, FsyncPolicy::Always);
+        assert_eq!(durability.compression, Compression::None);
+    }
+
+    #[test]
+    fn durability_knobs_thread_through() {
+        let cfg = IqdbConfig::new(4, DistanceMetric::Cosine)
+            .fsync(FsyncPolicy::Never)
+            .compression(Compression::Lz4);
+        let (_, _, _, durability) = cfg.into_parts();
+        assert_eq!(durability.fsync, FsyncPolicy::Never);
+        assert_eq!(durability.compression, Compression::Lz4);
     }
 }

@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-06-08
+
+v0.7.0 opens the alpha line with durable-storage tuning: callers can now choose the write-ahead-log fsync cadence and snapshot compression through [`IqdbConfig`]. Additive — the default behaviour (fsync every write, no compression) is unchanged.
+
+### Added
+
+- [`IqdbConfig::fsync`](./src/config.rs) takes a [`FsyncPolicy`] — `Always` (default), `Periodic(Duration)`, or `Never` — to trade durability for write throughput on the file-backed path.
+- [`IqdbConfig::compression`](./src/config.rs) takes a [`Compression`] — `None` (default), `Zstd { level }`, or `Lz4` — applied to the snapshot. Both re-exported from `iqdb-persist`.
+- New durability integration tests at [`tests/persistence.rs`](./tests/persistence.rs): a relaxed-fsync round-trip, a `zstd`-compressed round-trip (under the `zstd` feature), and rejection of a compression scheme whose feature is not compiled in.
+
+### Changed
+
+- Version bumped to 0.7.0. Durability and compression default to the prior behaviour, so existing callers are unaffected. The in-memory backend ignores both knobs.
+
+### Fixed
+
+- The `zstd` and `lz4` cargo features were declared in v0.5.0 but had no runtime effect — the durable open path always used `Compression::None`. They are now reachable through [`IqdbConfig::compression`].
+
+[`FsyncPolicy`]: https://docs.rs/iqdb-persist
+[`Compression`]: https://docs.rs/iqdb-persist
+
 ## [0.6.0] — 2026-06-08
 
 v0.6.0 adds an opt-in **async surface**. It is purely additive — the default build and the entire synchronous API are unchanged, and no Tokio dependency is pulled unless the `async` feature is enabled.
@@ -104,7 +125,8 @@ v0.5.0 re-platforms `iqdb` from a self-contained crate onto the **iqdb crate fam
 
 Nothing removed in v0.4.0 — the surface is additive on top of v0.3.0. The `Error::NotImplemented` variant remains in the public API (still `#[non_exhaustive]`) so future-milestone wiring patterns can continue to use it.
 
-[Unreleased]: https://github.com/jamesgober/iqdb/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/jamesgober/iqdb/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/jamesgober/iqdb/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/jamesgober/iqdb/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jamesgober/iqdb/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jamesgober/iqdb/compare/v0.3.0...v0.4.0

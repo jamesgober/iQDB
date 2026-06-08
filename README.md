@@ -74,7 +74,9 @@ iQDB ships milestone-by-milestone. Each tag below corresponds to a published rel
 | `v0.3.0` — search | shipped | Flat top-`k` search, filters, batch variants, NaN-aware ranking, property-based tests. |
 | `v0.4.0` — durable storage | shipped | Directory-backed store, snapshot + WAL, cross-platform sync, atomic compaction, corrupt-tail recovery. |
 | `v0.5.0` — family composition + approximate indices | shipped | Re-platformed onto the iqdb crate family. Re-exported vocabulary (`Vector`, `VectorId`, `Metadata`, `Value`, `Hit`, `Filter`, `DistanceMetric`). Selectable index — exact `Flat`, plus `Hnsw` and `Ivf` through `IqdbConfig`. Durable storage via `iqdb-persist`; optional result cache via `iqdb-cache`. Recall validated against the flat oracle. |
-| `v0.6.0` — async surface | **current** | `async`-feature-gated `AsyncIqdb`: a Tokio adapter that offloads each blocking call via `spawn_blocking`. Additive; the synchronous API and default build are unchanged. |
+| `v0.6.0` — async surface | shipped | `async`-feature-gated `AsyncIqdb`: a Tokio adapter that offloads each blocking call via `spawn_blocking`. Additive; the synchronous API and default build are unchanged. |
+| `v0.7.0` — durability tuning (alpha) | **current** | `IqdbConfig::fsync` (WAL fsync cadence) and `IqdbConfig::compression` (snapshot `zstd` / `lz4`), wiring the compression features through. Additive; defaults unchanged. |
+| `v0.8.x` — beta · `v0.9.x` — RC | planned | Broader testing, final benchmarks, doc polish. |
 | `v1.0.0` — API freeze | planned | Frozen public API and on-disk format. SemVer guarantees. Full benchmark suite. |
 
 The per-release detail — what was added, what changed, and what was verified — lives in the [`CHANGELOG`](./CHANGELOG.md) and the per-version notes under [`docs/release/`](./docs/release/).
@@ -193,6 +195,22 @@ fn main() -> Result<()> {
 ```
 
 A reopen whose requested `dim` / `metric` disagrees with the stored database fails with `Error::Config`. The stored index kind is part of the database identity and is restored from the snapshot regardless of the kind requested on reopen.
+
+By default every acknowledged write is `fsync`ed and the snapshot is uncompressed. Trade durability for throughput, or shrink the snapshot, through `IqdbConfig`:
+
+```rust,no_run
+use iqdb::{Compression, DistanceMetric, FsyncPolicy, Iqdb, IqdbConfig};
+use std::time::Duration;
+
+# fn run() -> iqdb::Result<()> {
+let cfg = IqdbConfig::new(128, DistanceMetric::Cosine)
+    .fsync(FsyncPolicy::Periodic(Duration::from_millis(50))) // bound the un-synced window
+    .compression(Compression::Zstd { level: 3 });            // requires the `zstd` feature
+let db = Iqdb::open_with("./data/vectors.iqdb", cfg)?;
+# let _ = db;
+# Ok(())
+# }
+```
 
 ### Async (the `async` feature)
 
