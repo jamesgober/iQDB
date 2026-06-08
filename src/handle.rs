@@ -116,7 +116,7 @@ impl Iqdb {
     ///
     /// # Errors
     ///
-    /// [`Error::Index`] with [`IqdbError::InvalidConfig`] if `dim` is zero.
+    /// [`Error::Config`] if `dim` is zero.
     ///
     /// # Examples
     ///
@@ -136,8 +136,9 @@ impl Iqdb {
     ///
     /// # Errors
     ///
-    /// [`Error::Index`] if the chosen index rejects the configuration (for
-    /// example `dim == 0`, or an IVF-PQ setup under an unsupported metric).
+    /// - [`Error::Config`] if `dim` is zero.
+    /// - [`Error::Index`] if the chosen index rejects the configuration (for
+    ///   example an IVF-PQ setup under an unsupported metric).
     ///
     /// # Examples
     ///
@@ -151,6 +152,7 @@ impl Iqdb {
     /// ```
     pub fn open_in_memory_with(config: IqdbConfig) -> Result<Self> {
         let (dim, metric, core_cfg) = config.into_parts();
+        Self::require_nonzero_dim(dim)?;
         let core = IqdbCore::new(dim, metric, core_cfg)?;
         Ok(Self {
             dim,
@@ -170,9 +172,8 @@ impl Iqdb {
     ///
     /// - [`Error::Persist`] on I/O failure, a corrupt snapshot, or a checksum
     ///   mismatch.
-    /// - [`Error::Config`] if a reopened database's `dim` / `metric` does not
-    ///   match the requested values.
-    /// - [`Error::Index`] if `dim` is zero on a fresh create.
+    /// - [`Error::Config`] if `dim` is zero, or if a reopened database's
+    ///   `dim` / `metric` does not match the requested values.
     ///
     /// # Examples
     ///
@@ -199,6 +200,7 @@ impl Iqdb {
     /// See [`Iqdb::open`].
     pub fn open_with<P: AsRef<Path>>(path: P, config: IqdbConfig) -> Result<Self> {
         let (dim, metric, core_cfg) = config.into_parts();
+        Self::require_nonzero_dim(dim)?;
         let cache = core_cfg.cache.clone();
         let path = path.as_ref().to_path_buf();
         let mut persist_cfg = PersistConfig::new(path.clone());
@@ -473,6 +475,18 @@ impl Iqdb {
 
     // -- internals ------------------------------------------------------
 
+    /// The single construction gate for `dim`. Every constructor funnels
+    /// through `open_in_memory_with` / `open_with`, so rejecting a zero
+    /// dimension here covers both the direct (`dim` argument) and the
+    /// `IqdbConfig` builder paths — a zero-dim config cannot be smuggled in.
+    fn require_nonzero_dim(dim: usize) -> Result<()> {
+        if dim == 0 {
+            Err(Error::Config("dim must be non-zero"))
+        } else {
+            Ok(())
+        }
+    }
+
     fn check_dim(&self, found: usize) -> Result<()> {
         if found == self.dim {
             Ok(())
@@ -562,7 +576,14 @@ mod tests {
 
     #[test]
     fn open_in_memory_rejects_zero_dim() {
-        assert!(Iqdb::open_in_memory(0, DistanceMetric::Cosine).is_err());
+        // Both the direct path and the IqdbConfig builder path hit the same
+        // gate and surface the same variant.
+        let direct = Iqdb::open_in_memory(0, DistanceMetric::Cosine).unwrap_err();
+        assert!(matches!(direct, Error::Config(_)), "got {direct:?}");
+
+        let via_config =
+            Iqdb::open_in_memory_with(IqdbConfig::new(0, DistanceMetric::Cosine)).unwrap_err();
+        assert!(matches!(via_config, Error::Config(_)), "got {via_config:?}");
     }
 
     #[test]
