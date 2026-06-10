@@ -65,8 +65,10 @@ fn corrupt_wal_tail_is_truncated_and_prior_records_survive() {
     // of the empty initial snapshot.
     {
         let db = Iqdb::open(&snap, 2, DistanceMetric::Cosine).unwrap();
-        db.upsert(VectorId::from(1u64), v(&[0.1, 0.2]), None).unwrap();
-        db.upsert(VectorId::from(2u64), v(&[0.3, 0.4]), None).unwrap();
+        db.upsert(VectorId::from(1u64), v(&[0.1, 0.2]), None)
+            .unwrap();
+        db.upsert(VectorId::from(2u64), v(&[0.3, 0.4]), None)
+            .unwrap();
     }
 
     // Simulate a torn write: append junk after the last good frame.
@@ -86,7 +88,8 @@ fn corrupt_wal_tail_is_truncated_and_prior_records_survive() {
     assert!(db.get(&VectorId::from(2u64)).unwrap().is_some());
 
     // The log is write-ready again: a further write + clean close persists.
-    db.upsert(VectorId::from(3u64), v(&[0.5, 0.6]), None).unwrap();
+    db.upsert(VectorId::from(3u64), v(&[0.5, 0.6]), None)
+        .unwrap();
     db.close().unwrap();
 
     let db = Iqdb::open(&snap, 2, DistanceMetric::Cosine).unwrap();
@@ -101,7 +104,8 @@ fn corrupt_snapshot_fails_the_open() {
     // Write and compact so the data lives in the snapshot, then drop.
     {
         let db = Iqdb::open(&snap, 2, DistanceMetric::Cosine).unwrap();
-        db.upsert(VectorId::from(1u64), v(&[1.0, 0.0]), None).unwrap();
+        db.upsert(VectorId::from(1u64), v(&[1.0, 0.0]), None)
+            .unwrap();
         db.close().unwrap();
     }
 
