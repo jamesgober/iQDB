@@ -76,8 +76,8 @@ iQDB ships milestone-by-milestone. Each tag below corresponds to a published rel
 | `v0.5.0` — family composition + approximate indices | shipped | Re-platformed onto the iqdb crate family. Re-exported vocabulary (`Vector`, `VectorId`, `Metadata`, `Value`, `Hit`, `Filter`, `DistanceMetric`). Selectable index — exact `Flat`, plus `Hnsw` and `Ivf` through `IqdbConfig`. Durable storage via `iqdb-persist`; optional result cache via `iqdb-cache`. Recall validated against the flat oracle. |
 | `v0.6.0` — async surface | shipped | `async`-feature-gated `AsyncIqdb`: a Tokio adapter that offloads each blocking call via `spawn_blocking`. Additive; the synchronous API and default build are unchanged. |
 | `v0.7.0` — durability tuning (alpha) | shipped | `IqdbConfig::fsync` (WAL fsync cadence) and `IqdbConfig::compression` (snapshot `zstd` / `lz4`), wiring the compression features through. Additive; defaults unchanged. |
-| `v0.8.0` — decoder hardening (beta) | **current** | Bounded every on-disk-decoder allocation against hostile length fields; fuzz-style robustness tests for the frame decoder; verified `cargo deny` / `cargo audit` pass. No API change. |
-| `v0.9.x` — RC | planned | Final benchmarks, doc polish, critical fixes only. |
+| `v0.8.0` — decoder hardening (beta) | shipped | Bounded every on-disk-decoder allocation against hostile length fields; fuzz-style robustness tests for the frame decoder; verified `cargo deny` / `cargo audit` pass. No API change. |
+| `v0.9.0` — release candidate | **current** | Crash-recovery integration tests (corrupt WAL tail / corrupt snapshot); captured `criterion` benchmark baselines. No API change. |
 | `v1.0.0` — API freeze | planned | Frozen public API and on-disk format. SemVer guarantees. Full benchmark suite. |
 
 The per-release detail — what was added, what changed, and what was verified — lives in the [`CHANGELOG`](./CHANGELOG.md) and the per-version notes under [`docs/release/`](./docs/release/).
@@ -316,6 +316,8 @@ A Criterion harness lives in [`benches/search.rs`](./benches/search.rs):
 cargo bench --bench search
 ```
 
+Indicative baselines on a developer machine (dim 64, 1 000 vectors): flat `search` ≈ 7.9 µs, HNSW `search` ≈ 35.8 µs, flat `upsert` of 1 000 vectors ≈ 185 µs. At this corpus size the exact flat scan beats HNSW's graph traversal — the approximate index earns its overhead at much larger scale.
+
 Criterion writes reports to `target/criterion/`. A regression beyond the REPS threshold (5% on a tracked metric) blocks a release.
 
 <hr>
@@ -330,6 +332,7 @@ Every public path has happy / error / edge-case coverage:
   - [`tests/persistence.rs`](./tests/persistence.rs) — durable lifecycle: open / upsert / close / reopen, delete and metadata persistence, WAL replay without close, dim/metric-mismatch rejection, IVF round-trip, multi-session accumulation.
   - [`tests/properties.rs`](./tests/properties.rs) — `proptest`-driven invariants: flat ranking (sorted, bounded, unique) and the durable round-trip preserving arbitrary record sets.
   - [`tests/recall.rs`](./tests/recall.rs) — recall@k of HNSW and IVF measured against the exact flat oracle on deterministic synthetic data.
+  - [`tests/recovery.rs`](./tests/recovery.rs) — crash recovery: a torn WAL tail is truncated (prior records survive), a corrupt snapshot fails the open, a non-database file is rejected.
 - Doc tests run as part of `cargo test` and validate every `# Examples` block.
 
 ```sh

@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-06-09
+
+v0.9.0 is the release candidate: it closes the crash-recovery test gap and captures benchmark baselines. No API changes.
+
+### Added
+
+- Crash-recovery integration tests at [`tests/recovery.rs`](./tests/recovery.rs), driven through the public handle by corrupting the on-disk files directly:
+  - a torn write-ahead-log tail is truncated to the last good offset — every record before the corruption survives and the log is left write-ready;
+  - a corrupt snapshot fails the open with `Error::Persist` instead of loading partial state;
+  - a non-database file is rejected with `Error::Persist`.
+  This pins the §8 "Crash recovery" invariant at the `iqdb` level (the lower-level framing is already covered inside `iqdb-persist`).
+
+### Performance
+
+- Captured `criterion` baselines for the search hot path (dim 64, 1 000 vectors): flat `search` ≈ 7.9 µs, HNSW `search` ≈ 35.8 µs, flat `upsert` of 1 000 vectors ≈ 185 µs. At this corpus size the exact flat scan beats HNSW's graph traversal — the approximate index pays off at larger scale, as documented.
+
+### Changed
+
+- Version bumped to 0.9.0 (release candidate). No public API change.
+
 ## [0.8.0] — 2026-06-08
 
 v0.8.0 is a beta-hardening release: it makes the on-disk decoder robust against hostile input, adds fuzz-style coverage for it, and records that the supply-chain gates pass. No API changes.
@@ -145,7 +165,8 @@ v0.5.0 re-platforms `iqdb` from a self-contained crate onto the **iqdb crate fam
 
 Nothing removed in v0.4.0 — the surface is additive on top of v0.3.0. The `Error::NotImplemented` variant remains in the public API (still `#[non_exhaustive]`) so future-milestone wiring patterns can continue to use it.
 
-[Unreleased]: https://github.com/jamesgober/iqdb/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/jamesgober/iqdb/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/jamesgober/iqdb/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/jamesgober/iqdb/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/jamesgober/iqdb/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/jamesgober/iqdb/compare/v0.5.0...v0.6.0

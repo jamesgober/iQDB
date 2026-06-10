@@ -16,7 +16,7 @@
 </div>
 <br>
 
-This document is the canonical API reference for **iqdb v0.8.0**. Every public type, method, error variant, and feature flag is recorded here with parameter descriptions and at least one runnable example. The narrative companion is the [README](../README.md); the per-release notes live under [`docs/release/`](./release/).
+This document is the canonical API reference for **iqdb v0.9.0**. Every public type, method, error variant, and feature flag is recorded here with parameter descriptions and at least one runnable example. The narrative companion is the [README](../README.md); the per-release notes live under [`docs/release/`](./release/).
 
 As of v0.5.0, `iqdb` is the integration layer over the **iqdb crate family**. The vector vocabulary it exposes (`Vector`, `VectorId`, `Metadata`, `Value`, `Hit`, `Filter`, `DistanceMetric`, `SearchParams`) is re-exported from [`iqdb-types`](https://docs.rs/iqdb-types); the tuning structs `HnswConfig`, `IvfConfig`, and `CacheConfig` are re-exported from the respective family crates. They are documented here as part of iqdb's public surface, with links to the originating crate for the exhaustive reference.
 
