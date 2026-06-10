@@ -41,7 +41,7 @@
         <strong>MSRV is 1.87+.</strong> The crate is dual-licensed under <code>Apache-2.0 OR MIT</code> at your option.
     </p>
     <blockquote>
-        <strong>0.5.0 re-platforms iQDB onto the iqdb crate family.</strong> The crate is now the integration layer that composes the family's shared vocabulary (<code>iqdb-types</code>), index seam (<code>iqdb-index</code>), exact and approximate indices (<code>iqdb-flat</code>, <code>iqdb-hnsw</code>, <code>iqdb-ivf</code>), durable storage (<code>iqdb-persist</code>), and an optional result cache (<code>iqdb-cache</code>). A database now fixes its dimensionality and distance metric at open time and routes searches through a selectable index — exact <code>Flat</code> by default, or approximate <code>Hnsw</code> / <code>Ivf</code> through <code>IqdbConfig</code>. This is a <b>breaking change</b> from the 0.4.x self-contained surface; the API is unstable until 1.0. <strong>0.6.0</strong> adds an opt-in async surface (<code>AsyncIqdb</code>) behind the <code>async</code> feature; the synchronous API is unchanged. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> for the release-by-release surface and <a href="./docs/API.md"><code>docs/API.md</code></a> for the full reference.
+        <strong>1.0.0 — stable.</strong> The public API and on-disk format are frozen. iQDB composes the published iqdb crate family for vocabulary (<code>iqdb-types</code>), index seam (<code>iqdb-index</code>), exact and approximate indices (<code>iqdb-flat</code>, <code>iqdb-hnsw</code>, <code>iqdb-ivf</code>), durable storage (<code>iqdb-persist</code>), and optional result caching (<code>iqdb-cache</code>). A database fixes its dimensionality and distance metric at open time; the index is selectable — exact <code>Flat</code> by default, or approximate <code>Hnsw</code> / <code>Ivf</code> through <code>IqdbConfig</code>. An opt-in async surface (<code>AsyncIqdb</code>) is available behind the <code>async</code> feature. Migrating from 0.4.x? See the <a href="./CHANGELOG.md#migration-from-04x--100">migration guide</a>. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> for the full release history and <a href="./docs/API.md"><code>docs/API.md</code></a> for the API reference.
     </blockquote>
 </div>
 
@@ -77,8 +77,8 @@ iQDB ships milestone-by-milestone. Each tag below corresponds to a published rel
 | `v0.6.0` — async surface | shipped | `async`-feature-gated `AsyncIqdb`: a Tokio adapter that offloads each blocking call via `spawn_blocking`. Additive; the synchronous API and default build are unchanged. |
 | `v0.7.0` — durability tuning (alpha) | shipped | `IqdbConfig::fsync` (WAL fsync cadence) and `IqdbConfig::compression` (snapshot `zstd` / `lz4`), wiring the compression features through. Additive; defaults unchanged. |
 | `v0.8.0` — decoder hardening (beta) | shipped | Bounded every on-disk-decoder allocation against hostile length fields; fuzz-style robustness tests for the frame decoder; verified `cargo deny` / `cargo audit` pass. No API change. |
-| `v0.9.0` — release candidate | **current** | Crash-recovery integration tests (corrupt WAL tail / corrupt snapshot); captured `criterion` benchmark baselines. No API change. |
-| `v1.0.0` — API freeze | planned | Frozen public API and on-disk format. SemVer guarantees. Full benchmark suite. |
+| `v0.9.0` — release candidate | shipped | Crash-recovery integration tests (corrupt WAL tail / corrupt snapshot); captured `criterion` benchmark baselines. No API change. |
+| `v1.0.0` — stable | **current** | Public API and on-disk format frozen. SemVer guarantees. `IndexKind` marked `#[non_exhaustive]`. Migration guide from 0.4.x. |
 
 The per-release detail — what was added, what changed, and what was verified — lives in the [`CHANGELOG`](./CHANGELOG.md) and the per-version notes under [`docs/release/`](./docs/release/).
 
@@ -91,17 +91,17 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-iqdb = "0.5"
+iqdb = "1"
 ```
 
 Optional features (all additive):
 
 ```toml
 [dependencies]
-iqdb = { version = "0.5", features = ["serde", "parallel", "zstd"] }
+iqdb = { version = "1", features = ["serde", "parallel", "zstd"] }
 ```
 
-iQDB compiles on stable Rust **1.87** and newer. As of 0.5.0 it composes the published iqdb family crates (`iqdb-types`, `iqdb-index`, `iqdb-flat`, `iqdb-hnsw`, `iqdb-ivf`, `iqdb-build`, `iqdb-persist`, `iqdb-cache`, and their transitive dependencies); it is no longer a zero-dependency build.
+iQDB compiles on stable Rust **1.87** and newer. It composes the published iqdb family crates (`iqdb-types`, `iqdb-index`, `iqdb-flat`, `iqdb-hnsw`, `iqdb-ivf`, `iqdb-build`, `iqdb-persist`, `iqdb-cache`, and their transitive dependencies).
 
 <hr>
 <br>
@@ -376,7 +376,7 @@ Feature flags are strictly additive (per REPS) — enabling any combination neve
 | `async`    | off     | Tokio-driven `AsyncIqdb` mirror of the public API. Pulls `tokio` (only the `rt` feature). |
 
 ```toml
-iqdb = { version = "0.5", features = ["serde"] }
+iqdb = { version = "1", features = ["serde"] }
 ```
 
 ### Runtime configuration

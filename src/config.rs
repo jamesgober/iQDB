@@ -55,6 +55,7 @@ pub use iqdb_persist::{Compression, FsyncPolicy};
 /// let ivf = IndexKind::Ivf(IvfConfig::default().with_n_probes(16));
 /// assert!(matches!(ivf, IndexKind::Ivf(_)));
 /// ```
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IndexKind {
     /// Exact brute-force search. The recall ground truth; no tuning needed.

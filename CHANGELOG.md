@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-06-09
+
+v1.0.0 is the stable release: the public API and on-disk format are now **frozen** and covered by SemVer guarantees. There are no surface changes from 0.9.0; this release upgrades the stability classification and ships the migration guide.
+
+### Changed
+
+- **Version bumped to 1.0.0. The public API is frozen until 2.0.** No breaking changes will be made to `Iqdb`, `AsyncIqdb`, `IqdbConfig`, `IndexKind`, `Error`, `Result`, or any re-exported vocabulary type before a 2.0 major bump.
+- **On-disk format locked at version 1.** The snapshot framing (magic `IQDC`, format version `1`, CRC32-checked frames) and the iqdb payload codec (magic, version, index-kind tag, LE dim, LE metric, row count, rows) are stable. A database written by any 1.x release reads back correctly by any other 1.x release.
+- [`IndexKind`](./src/config.rs) is now `#[non_exhaustive]`. Exhaustive `match` arms without a wildcard will fail to compile outside the crate; add `_` to future-proof against new variants in 1.x minor releases.
+
+### Migration from 0.4.x → 1.0.0
+
+The 0.5.0 re-platform was the only breaking change in this series. From 0.5.0 through 0.9.0 the API was entirely additive. See [`[0.5.0]`](#050--2026-06-08) for the full break list; the short version:
+
+| 0.4.x surface | 1.0 replacement |
+|---|---|
+| `Record`, `RecordId`, `Payload` | `VectorId`, `Vector`, `Metadata` (from `iqdb-types`) |
+| `SearchResult` | `Hit { id, distance, metadata }` |
+| `search(&query, k, metric)` | `search(&query, k)` — metric fixed at open |
+| `Iqdb::open(path)` — directory | `Iqdb::open(path, dim, metric)` — snapshot file |
+| `DistanceMetric::L2` | `DistanceMetric::Euclidean` |
+| `DistanceMetric::Dot` | `DistanceMetric::DotProduct` |
+
+From 0.5.x–0.9.x to 1.0.0: no changes required.
+
 ## [0.9.0] — 2026-06-09
 
 v0.9.0 is the release candidate: it closes the crash-recovery test gap and captures benchmark baselines. No API changes.
@@ -165,7 +190,8 @@ v0.5.0 re-platforms `iqdb` from a self-contained crate onto the **iqdb crate fam
 
 Nothing removed in v0.4.0 — the surface is additive on top of v0.3.0. The `Error::NotImplemented` variant remains in the public API (still `#[non_exhaustive]`) so future-milestone wiring patterns can continue to use it.
 
-[Unreleased]: https://github.com/jamesgober/iqdb/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/jamesgober/iqdb/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/jamesgober/iqdb/compare/v0.9.0...v1.0.0
 [0.9.0]: https://github.com/jamesgober/iqdb/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/jamesgober/iqdb/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/jamesgober/iqdb/compare/v0.6.0...v0.7.0
