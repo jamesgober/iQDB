@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-06-08
+
+v0.8.0 is a beta-hardening release: it makes the on-disk decoder robust against hostile input, adds fuzz-style coverage for it, and records that the supply-chain gates pass. No API changes.
+
+### Fixed
+
+- **Bounded every pre-allocation in the on-disk decoder.** `engine::codec::decode` previously sized buffers directly from untrusted length fields (`vec![0f32; dim]`, `Vec::with_capacity(n_rows)`, `vec![0u8; len]`), so a corrupt or crafted payload naming a multi-gigabyte length could trigger an out-of-memory abort. Capacity hints are now clamped (`MAX_PREALLOC`) and collections grow only as real bytes arrive, so a length larger than the data on the wire fails fast with `PersistError::TruncatedPayload` instead of allocating. This upholds the engineering rule that every allocation is bounded and library code never panics on hostile input.
+
+### Added
+
+- Fuzz-style robustness tests for the frame decoder in [`src/engine/codec.rs`](./src/engine/codec.rs): arbitrary-byte input (and arbitrary input behind a valid magic + version header) never panics, single-bit flips of a valid payload never panic, and every truncated prefix of a valid payload is rejected. These are the stable, in-CI equivalent of fuzzing the decoder (DIRECTIVES §5).
+
+### Verified
+
+- `cargo deny check` (advisories / bans / licenses / sources) and `cargo audit` (0 advisories across the dependency tree) pass, satisfying the dependency-policy item of the Definition of Done.
+
+### Changed
+
+- Version bumped to 0.8.0 (beta line). No public API change.
+
 ## [0.7.0] — 2026-06-08
 
 v0.7.0 opens the alpha line with durable-storage tuning: callers can now choose the write-ahead-log fsync cadence and snapshot compression through [`IqdbConfig`]. Additive — the default behaviour (fsync every write, no compression) is unchanged.
@@ -125,7 +145,8 @@ v0.5.0 re-platforms `iqdb` from a self-contained crate onto the **iqdb crate fam
 
 Nothing removed in v0.4.0 — the surface is additive on top of v0.3.0. The `Error::NotImplemented` variant remains in the public API (still `#[non_exhaustive]`) so future-milestone wiring patterns can continue to use it.
 
-[Unreleased]: https://github.com/jamesgober/iqdb/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/jamesgober/iqdb/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/jamesgober/iqdb/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/jamesgober/iqdb/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/jamesgober/iqdb/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jamesgober/iqdb/compare/v0.4.0...v0.5.0

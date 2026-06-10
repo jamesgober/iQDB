@@ -37,6 +37,14 @@ const MAGIC: [u8; 4] = *b"IQDC";
 /// The payload format version. Bumped on any incompatible layout change.
 const VERSION: u32 = 1;
 
+/// Upper bound on how many elements a decode step will *pre-allocate* from a
+/// length field before any bytes have arrived. Length fields are untrusted —
+/// a corrupt or hostile payload can name a multi-gigabyte count — so capacity
+/// hints are clamped to this and the collection grows only as real bytes are
+/// read. A short input then fails fast on the next `read_exact` instead of
+/// triggering a giant up-front allocation.
+const MAX_PREALLOC: usize = 4096;
+
 /// A decoded payload: everything [`crate::engine::IqdbCore::load_from`] needs
 /// to reconstruct the database.
 #[derive(Debug)]
@@ -92,14 +100,16 @@ pub(crate) fn decode(r: &mut dyn Read) -> Result<Decoded> {
     let metric = metric_from_tag(read_u8(r)?)?;
     let n_rows = read_usize(r, "n_rows")?;
 
-    let mut rows = Vec::with_capacity(n_rows);
+    let mut rows = Vec::with_capacity(n_rows.min(MAX_PREALLOC));
     for _ in 0..n_rows {
         let id = decode_id(r)?;
-        let mut buf = vec![0f32; dim];
+        // Grow as components arrive — a hostile `dim` cannot force a huge
+        // up-front buffer; a short input fails on the read below.
+        let mut buf: Vec<f32> = Vec::with_capacity(dim.min(MAX_PREALLOC));
         let mut b = [0u8; 4];
-        for slot in buf.iter_mut() {
+        for _ in 0..dim {
             r.read_exact(&mut b).map_err(io)?;
-            *slot = f32::from_le_bytes(b);
+            buf.push(f32::from_le_bytes(b));
         }
         let meta = decode_meta(r)?;
         rows.push(Row {
@@ -252,7 +262,7 @@ fn decode_meta(r: &mut dyn Read) -> Result<Option<Metadata>> {
         0 => Ok(None),
         1 => {
             let count = read_u32(r)? as usize;
-            let mut entries = Vec::with_capacity(count);
+            let mut entries = Vec::with_capacity(count.min(MAX_PREALLOC));
             for _ in 0..count {
                 let key = decode_str(r)?;
                 let value = decode_value(r)?;
@@ -381,8 +391,17 @@ fn read_usize(r: &mut dyn Read, what: &'static str) -> Result<usize> {
 }
 
 fn read_vec(r: &mut dyn Read, len: usize) -> Result<Vec<u8>> {
-    let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf).map_err(io)?;
+    // Read at most `len` bytes, growing from a clamped capacity. A length
+    // field larger than the data on the wire reads short and is rejected,
+    // rather than pre-allocating `len` bytes from an untrusted count.
+    let mut buf = Vec::with_capacity(len.min(MAX_PREALLOC));
+    let read = r.take(len as u64).read_to_end(&mut buf).map_err(io)?;
+    if read != len {
+        return Err(PersistError::TruncatedPayload {
+            needed: len as u64,
+            found: read as u64,
+        });
+    }
     Ok(buf)
 }
 
@@ -464,6 +483,82 @@ mod tests {
         let bytes = [0u8; 32];
         let err = decode(&mut &bytes[..]).unwrap_err();
         assert!(matches!(err, PersistError::InvalidPayload { .. }));
+    }
+
+    #[test]
+    fn truncation_at_every_offset_is_rejected_without_panic() {
+        // A full, valid payload with a Bytes id and metadata.
+        let mut store = RowStore::new();
+        let meta: Metadata = [("k".to_string(), Value::String("v".into()))]
+            .into_iter()
+            .collect();
+        let _ = store.upsert(
+            VectorId::try_from(vec![1, 2, 3]).unwrap(),
+            Arc::from(&[1.0f32, 2.0][..]),
+            Some(meta),
+        );
+        let mut full = Vec::new();
+        encode(
+            &mut full,
+            IndexKind::Flat,
+            2,
+            DistanceMetric::Cosine,
+            &store,
+        )
+        .unwrap();
+
+        // Every proper prefix must decode to an error, never a panic and
+        // never a giant allocation from a half-read length field.
+        for cut in 0..full.len() {
+            let prefix = &full[..cut];
+            assert!(
+                decode(&mut &prefix[..]).is_err(),
+                "prefix len {cut} decoded Ok"
+            );
+        }
+        // The complete payload still decodes.
+        assert!(decode(&mut &full[..]).is_ok());
+    }
+
+    proptest! {
+        // The on-disk frame decoder must never panic or trigger an unbounded
+        // allocation on hostile input — a malformed frame is rejected, full
+        // stop. This is the stable, in-CI equivalent of fuzzing `decode`.
+        #[test]
+        fn decode_never_panics_on_arbitrary_bytes(
+            bytes in proptest::collection::vec(proptest::num::u8::ANY, 0..2048),
+        ) {
+            // Success or a clean error — both are fine; a panic or OOM is not.
+            let _ = decode(&mut &bytes[..]);
+        }
+
+        // Arbitrary bytes carrying the valid magic + version header (so the
+        // decoder proceeds past the cheap rejects into the length-driven body)
+        // must still be handled gracefully.
+        #[test]
+        fn decode_never_panics_with_valid_header_prefix(
+            tail in proptest::collection::vec(proptest::num::u8::ANY, 0..2048),
+        ) {
+            let mut bytes = Vec::with_capacity(8 + tail.len());
+            bytes.extend_from_slice(&MAGIC);
+            bytes.extend_from_slice(&VERSION.to_le_bytes());
+            bytes.extend_from_slice(&tail);
+            let _ = decode(&mut &bytes[..]);
+        }
+
+        // Flipping any single bit of a valid payload yields a clean decode or
+        // a clean error, never a panic.
+        #[test]
+        fn single_bit_flip_never_panics(bit in 0usize..2048) {
+            let mut store = RowStore::new();
+            let _ = store.upsert(VectorId::from(1u64), Arc::from(&[1.0f32, 2.0, 3.0][..]), None);
+            let mut bytes = Vec::new();
+            encode(&mut bytes, IndexKind::Flat, 3, DistanceMetric::Cosine, &store).unwrap();
+            if bit < bytes.len() * 8 {
+                bytes[bit / 8] ^= 1 << (bit % 8);
+                let _ = decode(&mut &bytes[..]);
+            }
+        }
     }
 
     proptest! {

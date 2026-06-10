@@ -75,8 +75,9 @@ iQDB ships milestone-by-milestone. Each tag below corresponds to a published rel
 | `v0.4.0` — durable storage | shipped | Directory-backed store, snapshot + WAL, cross-platform sync, atomic compaction, corrupt-tail recovery. |
 | `v0.5.0` — family composition + approximate indices | shipped | Re-platformed onto the iqdb crate family. Re-exported vocabulary (`Vector`, `VectorId`, `Metadata`, `Value`, `Hit`, `Filter`, `DistanceMetric`). Selectable index — exact `Flat`, plus `Hnsw` and `Ivf` through `IqdbConfig`. Durable storage via `iqdb-persist`; optional result cache via `iqdb-cache`. Recall validated against the flat oracle. |
 | `v0.6.0` — async surface | shipped | `async`-feature-gated `AsyncIqdb`: a Tokio adapter that offloads each blocking call via `spawn_blocking`. Additive; the synchronous API and default build are unchanged. |
-| `v0.7.0` — durability tuning (alpha) | **current** | `IqdbConfig::fsync` (WAL fsync cadence) and `IqdbConfig::compression` (snapshot `zstd` / `lz4`), wiring the compression features through. Additive; defaults unchanged. |
-| `v0.8.x` — beta · `v0.9.x` — RC | planned | Broader testing, final benchmarks, doc polish. |
+| `v0.7.0` — durability tuning (alpha) | shipped | `IqdbConfig::fsync` (WAL fsync cadence) and `IqdbConfig::compression` (snapshot `zstd` / `lz4`), wiring the compression features through. Additive; defaults unchanged. |
+| `v0.8.0` — decoder hardening (beta) | **current** | Bounded every on-disk-decoder allocation against hostile length fields; fuzz-style robustness tests for the frame decoder; verified `cargo deny` / `cargo audit` pass. No API change. |
+| `v0.9.x` — RC | planned | Final benchmarks, doc polish, critical fixes only. |
 | `v1.0.0` — API freeze | planned | Frozen public API and on-disk format. SemVer guarantees. Full benchmark suite. |
 
 The per-release detail — what was added, what changed, and what was verified — lives in the [`CHANGELOG`](./CHANGELOG.md) and the per-version notes under [`docs/release/`](./docs/release/).
