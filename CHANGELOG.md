@@ -6,6 +6,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+Planned as 1.0.1. No API or on-disk format changes. Needs the 1.0.1 / 1.1.0
+releases of `iqdb-types`, `iqdb-distance`, `iqdb-filter`, `iqdb-flat`,
+`iqdb-hnsw`, `iqdb-ivf` and `iqdb-persist`.
+
+### Fixed
+
+- Writes acknowledged after recovering from a torn write-ahead log tail were
+  lost on the next restart. Fixed in `iqdb-persist` 1.0.1, which cuts the
+  torn bytes off before appending; the dependency floor is raised to it.
+- An HNSW database could return no results for a query whose neighbourhood
+  had been deleted or updated, while live rows remained. Fixed in
+  `iqdb-hnsw` 1.1.0.
+- HNSW databases grew with every update: each update of an existing id left
+  the old graph node behind. The graph is now rebuilt from the live rows once
+  deleted nodes outnumber them (and number at least 1,024), and
+  `Iqdb::optimize` rebuilds it on demand.
+- An IVF database could not answer any search until it held `n_clusters`
+  rows (256 by default), and every failed attempt took the write lock and
+  scanned the store. Below that threshold searches now scan every row
+  exactly, and the index trains on the first search after enough rows arrive.
+- The README claimed a lock-free hot path, an allocation-free steady state,
+  and a cache-aware on-disk layout. It now describes what the code does:
+  searches share a read lock, and every write is logged and `fsync`ed before
+  it is acknowledged. It also says that a database file should be opened from
+  one handle in one process at a time.
+
+### Security
+
+- A very large `k` passed to `search` reached index buffer allocations and
+  could abort the process. `k` is now clamped to the number of stored rows.
+- A snapshot with a valid checksum but an impossible stored index config
+  (for example an HNSW `m` of `2^40` or an IVF `n_clusters` of `2^40`) could
+  abort the process while loading. Those sizes are now rejected by the index
+  constructors in `iqdb-hnsw` 1.1.0 and `iqdb-ivf` 1.0.1, and the load fails
+  with an error.
+- Snapshot decompression is bounded by its recorded length (`iqdb-persist`
+  1.0.1), and filters are capped in total size (`iqdb-filter` 1.1.0).
+
 ## [1.0.0] — 2026-06-09
 
 v1.0.0 is the stable release: the public API and on-disk format are now **frozen** and covered by SemVer guarantees. There are no surface changes from 0.9.0; this release upgrades the stability classification and ships the migration guide.

@@ -27,10 +27,10 @@
 <div align="left">
     <p>
         <strong>iQDB</strong> is an <b>embedded vector database</b> for Rust, a single-process, in-application similarity-search engine designed for <em>high-dimensional</em> workloads where every microsecond on the query path matters.
-        It targets the same operational shape as <code>sqlite</code> or <code>redb</code>: no daemon, no network hop, no separate runtime. Open a handle, write vectors, query nearest neighbours — all from inside your binary.
+        It targets the same operational shape as <code>sqlite</code> or <code>redb</code>: no daemon, no network hop, no separate runtime. Open a handle, write vectors, query nearest neighbours — all from inside your binary. Open each database file from one handle in one process at a time; the files are not locked against a second opener.
     </p>
     <p>
-        The engine is built against a <b>lock-free hot path</b>, <b>allocation-free steady state</b>, and a <b>cache-aware</b> on-disk layout. Exact brute-force search, approximate-nearest-neighbour indices (HNSW and IVF), payload metadata, declarative filters, and durable write-ahead-logged storage are all in scope. Indices and storage are pluggable, so workloads can trade recall for latency without rewriting the surrounding application.
+        Searches share a read lock, so any number run in parallel while a write holds it alone, and every write is logged and <code>fsync</code>ed before it is acknowledged. Exact brute-force search, approximate-nearest-neighbour indices (HNSW and IVF), payload metadata, declarative filters, and durable write-ahead-logged storage are all in scope. Indices and storage are pluggable, so workloads can trade recall for latency without rewriting the surrounding application.
     </p>
     <p>
         Built for <b>cross-platform</b> deployment from day one — Linux, macOS, and Windows are first-class targets, with the strongest power-loss sync each platform offers and atomic file replacement everywhere.
@@ -41,7 +41,7 @@
         <strong>MSRV is 1.87+.</strong> The crate is dual-licensed under <code>Apache-2.0 OR MIT</code> at your option.
     </p>
     <blockquote>
-        <strong>1.0.0 — stable.</strong> The public API and on-disk format are frozen. iQDB composes the published iqdb crate family for vocabulary (<code>iqdb-types</code>), index seam (<code>iqdb-index</code>), exact and approximate indices (<code>iqdb-flat</code>, <code>iqdb-hnsw</code>, <code>iqdb-ivf</code>), durable storage (<code>iqdb-persist</code>), and optional result caching (<code>iqdb-cache</code>). A database fixes its dimensionality and distance metric at open time; the index is selectable — exact <code>Flat</code> by default, or approximate <code>Hnsw</code> / <code>Ivf</code> through <code>IqdbConfig</code>. An opt-in async surface (<code>AsyncIqdb</code>) is available behind the <code>async</code> feature. Migrating from 0.4.x? See the <a href="./CHANGELOG.md#migration-from-04x--100">migration guide</a>. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> for the full release history and <a href="./docs/API.md"><code>docs/API.md</code></a> for the API reference.
+        <strong>1.0.1 — stable.</strong> The public API and on-disk format are frozen. iQDB composes the published iqdb crate family for vocabulary (<code>iqdb-types</code>), index seam (<code>iqdb-index</code>), exact and approximate indices (<code>iqdb-flat</code>, <code>iqdb-hnsw</code>, <code>iqdb-ivf</code>), durable storage (<code>iqdb-persist</code>), and optional result caching (<code>iqdb-cache</code>). A database fixes its dimensionality and distance metric at open time; the index is selectable — exact <code>Flat</code> by default, or approximate <code>Hnsw</code> / <code>Ivf</code> through <code>IqdbConfig</code>. An opt-in async surface (<code>AsyncIqdb</code>) is available behind the <code>async</code> feature. Migrating from 0.4.x? See the <a href="./CHANGELOG.md#migration-from-04x--100">migration guide</a>. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> for the full release history and <a href="./docs/API.md"><code>docs/API.md</code></a> for the API reference.
     </blockquote>
 </div>
 
@@ -78,7 +78,8 @@ iQDB ships milestone-by-milestone. Each tag below corresponds to a published rel
 | `v0.7.0` — durability tuning (alpha) | shipped | `IqdbConfig::fsync` (WAL fsync cadence) and `IqdbConfig::compression` (snapshot `zstd` / `lz4`), wiring the compression features through. Additive; defaults unchanged. |
 | `v0.8.0` — decoder hardening (beta) | shipped | Bounded every on-disk-decoder allocation against hostile length fields; fuzz-style robustness tests for the frame decoder; verified `cargo deny` / `cargo audit` pass. No API change. |
 | `v0.9.0` — release candidate | shipped | Crash-recovery integration tests (corrupt WAL tail / corrupt snapshot); captured `criterion` benchmark baselines. No API change. |
-| `v1.0.0` — stable | **current** | Public API and on-disk format frozen. SemVer guarantees. `IndexKind` marked `#[non_exhaustive]`. Migration guide from 0.4.x. |
+| `v1.0.0` — stable | shipped | Public API and on-disk format frozen. SemVer guarantees. `IndexKind` marked `#[non_exhaustive]`. Migration guide from 0.4.x. |
+| `v1.0.1` — fixes | **current** | Writes after a torn-log recovery survive the next restart; HNSW search and memory under updates; small IVF databases answer searches; `k` and stored index sizes bounded. No API change. |
 
 The per-release detail — what was added, what changed, and what was verified — lives in the [`CHANGELOG`](./CHANGELOG.md) and the per-version notes under [`docs/release/`](./docs/release/).
 
@@ -178,7 +179,7 @@ fn main() -> Result<()> {
 }
 ```
 
-On the approximate indices the metadata filter is applied after graph / cluster traversal, so a highly selective filter can return fewer than `k` hits — widen the search (HNSW `filter_widen`, IVF `n_probes`) when that matters. IVF is trained lazily from the stored vectors on the first search; after many writes, `Iqdb::optimize` retrains its centroids.
+HNSW applies the metadata filter while it walks the graph, so it returns `k` hits whenever that many matches are reachable. IVF probes a fixed number of clusters, so a highly selective filter can return fewer than `k` hits there; raise `n_probes` when that matters. IVF is trained lazily from the stored vectors on the first search once the database holds at least `n_clusters` rows (256 for IVF-PQ); until then searches scan every row exactly. After many writes, `Iqdb::optimize` retrains IVF centroids, and for HNSW it drops deleted nodes from the graph (which also happens on its own once they outnumber live rows).
 
 ### Durable, file-backed storage
 
