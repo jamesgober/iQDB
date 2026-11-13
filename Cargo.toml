@@ -1,6 +1,6 @@
 [package]
 name = "iqdb"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 rust-version = "1.87"
 readme = "README.md"
@@ -34,15 +34,15 @@ rustdoc-args = ["--cfg", "docsrs"]
 # vocabulary, the index seam, the index implementations, durability,
 # and caching. Pinned to the published 1.0 line — never path deps, so
 # the standalone repo builds without its siblings checked out.
-iqdb-types = "1.0.0"      # shared vocabulary: Vector, VectorId, Metadata, Hit, Filter, ...
-iqdb-distance = "1.0.0"   # SIMD distance kernels behind DistanceMetric
+iqdb-types = "1.0.1"      # shared vocabulary: Vector, VectorId, Metadata, Hit, Filter, ...
+iqdb-distance = "1.0.1"   # SIMD distance kernels behind DistanceMetric
 iqdb-index = "1.0.0"      # the Index / IndexCore search seam
-iqdb-filter = "1.0.0"     # declarative Filter evaluation
-iqdb-flat = "1.0.0"       # exact flat index (the recall ground truth)
-iqdb-hnsw = "1.0.0"       # graph approximate index
-iqdb-ivf = "1.0.0"        # clustered approximate index (IVF-Flat / IVF-PQ)
+iqdb-filter = "1.1.0"     # declarative Filter evaluation
+iqdb-flat = "1.0.1"       # exact flat index (the recall ground truth)
+iqdb-hnsw = "1.1.0"       # graph approximate index
+iqdb-ivf = "1.0.1"        # clustered approximate index (IVF-Flat / IVF-PQ)
 iqdb-build = "1.0.0"      # bulk / parallel index construction
-iqdb-persist = "1.0.0"    # atomic snapshot + WAL durability
+iqdb-persist = "1.0.1"    # atomic snapshot + WAL durability
 iqdb-cache = "1.0.0"      # optional result-cache wrapper
 
 # Async surface (opt-in via the `async` feature). The family is synchronous
@@ -111,3 +111,15 @@ name = "index_selection"
 [[example]]
 name = "async_search"
 required-features = ["async"]
+
+# The fixes these floors need are not on crates.io yet. Build against their
+# branches until they are published, then delete this block.
+[patch.crates-io]
+iqdb-types = { git = "https://github.com/jamesgober/iqdb-types", branch = "fix/serde-validation" }
+iqdb-distance = { git = "https://github.com/jamesgober/iqdb-distance", branch = "fix/overflow-nan" }
+iqdb-filter = { git = "https://github.com/jamesgober/iqdb-filter", branch = "fix/filter-size-budget" }
+iqdb-flat = { git = "https://github.com/jamesgober/iqdb-flat", branch = "fix/nan-ranking" }
+iqdb-hnsw = { git = "https://github.com/jamesgober/iqdb-hnsw", branch = "fix/deletes-and-bounds" }
+iqdb-ivf = { git = "https://github.com/jamesgober/iqdb-ivf", branch = "fix/retrain-and-bounds" }
+iqdb-persist = { git = "https://github.com/jamesgober/iqdb-persist", branch = "fix/wal-recovery" }
+iqdb-quantize = { git = "https://github.com/jamesgober/iqdb-quantize", branch = "fix/foreign-codes-and-wide-ranges" }

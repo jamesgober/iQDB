@@ -266,7 +266,7 @@ checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
 name = "iqdb"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "criterion",
  "fastrand",
@@ -310,27 +310,24 @@ dependencies = [
 
 [[package]]
 name = "iqdb-distance"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d52772471e43228bc0603d921f767751df292175279405a199bc80e2f5d86c43"
+version = "1.0.1"
+source = "git+https://github.com/jamesgober/iqdb-distance?branch=fix%2Foverflow-nan#5a3d3df6fec5432fe7bd6f72f2f02827ca7fc608"
 dependencies = [
  "iqdb-types",
 ]
 
 [[package]]
 name = "iqdb-filter"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "705cecf92d3501ec79c754da0c87b37ea18952e31b95f2535f7fa2ac2088b9b7"
+version = "1.1.0"
+source = "git+https://github.com/jamesgober/iqdb-filter?branch=fix%2Ffilter-size-budget#c13db66cd41416261a955e8a9deeecb106455236"
 dependencies = [
  "iqdb-types",
 ]
 
 [[package]]
 name = "iqdb-flat"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac491ac85c4972908eaa1ec4cfd2825da0515a2ab46cdea2190d0a6a197c592e"
+version = "1.0.1"
+source = "git+https://github.com/jamesgober/iqdb-flat?branch=fix%2Fnan-ranking#b17fa21b164c6382cf311ee09275421f6e2ba46e"
 dependencies = [
  "iqdb-distance",
  "iqdb-filter",
@@ -341,9 +338,8 @@ dependencies = [
 
 [[package]]
 name = "iqdb-hnsw"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67773162f481561eb11232afe556d1dd42e89011eba6a70ee2fd2c2e7a33ac9f"
+version = "1.1.0"
+source = "git+https://github.com/jamesgober/iqdb-hnsw?branch=fix%2Fdeletes-and-bounds#414a8f22b562669458ec77b877ce32f23cd8eb9a"
 dependencies = [
  "iqdb-distance",
  "iqdb-filter",
@@ -362,9 +358,8 @@ dependencies = [
 
 [[package]]
 name = "iqdb-ivf"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1c28298a9228a4a5a07d30f51eaa6c46ad2dc385e0c7946f94a06f3eea13567"
+version = "1.0.1"
+source = "git+https://github.com/jamesgober/iqdb-ivf?branch=fix%2Fretrain-and-bounds#0cc83bbfe0209bbcb9780a13f0032176ca552df3"
 dependencies = [
  "error-forge",
  "iqdb-distance",
@@ -377,9 +372,8 @@ dependencies = [
 
 [[package]]
 name = "iqdb-persist"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "efa137128d3b6826100164976587a47a42352a00cd0408d9c69d86b34c702bd8"
+version = "1.0.1"
+source = "git+https://github.com/jamesgober/iqdb-persist?branch=fix%2Fwal-recovery#cc329ff08ad4b430a98ed5e3cff4108836f1d444"
 dependencies = [
  "crc32fast",
  "error-forge",
@@ -393,9 +387,8 @@ dependencies = [
 
 [[package]]
 name = "iqdb-quantize"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83f214d2fbd6b922f238643656390ff89e3afc6ed5b9ebe591aecfdb90d4257e"
+version = "1.0.1"
+source = "git+https://github.com/jamesgober/iqdb-quantize?branch=fix%2Fforeign-codes-and-wide-ranges#057fd8262890727d3613e94db9af387aedf3efe1"
 dependencies = [
  "error-forge",
  "iqdb-distance",
@@ -405,9 +398,8 @@ dependencies = [
 
 [[package]]
 name = "iqdb-types"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "276d9bdc30d451d1f90417a8a2b97763d238e3180479355895ebb9465ca84524"
+version = "1.0.1"
+source = "git+https://github.com/jamesgober/iqdb-types?branch=fix%2Fserde-validation#f7f69f5557c5c104404a6d1a4b31a81af32b7bd6"
 dependencies = [
  "error-forge",
  "serde",

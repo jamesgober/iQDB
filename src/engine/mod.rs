@@ -33,6 +33,7 @@ use std::sync::Arc;
 
 use iqdb_build::build_into;
 use iqdb_cache::{CacheConfig, CacheStats, CachedIndex};
+use iqdb_flat::{FlatConfig, FlatIndex};
 use iqdb_index::{Index, IndexCore, IndexStats};
 use iqdb_persist::{PersistError, Persistable, Result as PersistResult};
 use iqdb_types::{DistanceMetric, Hit, IqdbError, Metadata, Result, SearchParams, VectorId};
@@ -40,6 +41,10 @@ use iqdb_types::{DistanceMetric, Hit, IqdbError, Metadata, Result, SearchParams,
 use crate::config::{CoreConfig, IndexKind};
 use index::AnyIndex;
 use store::RowStore;
+
+/// Fewest rows an IVF-PQ codebook trains on (one per centroid of its
+/// 256-entry codebooks).
+const PQ_MIN_TRAINING_ROWS: usize = 256;
 
 /// The search index, optionally wrapped in a result cache.
 ///
@@ -73,6 +78,20 @@ impl CacheLayer {
         match self {
             Self::Plain(idx) => idx.needs_training(),
             Self::Cached(cached) => cached.get_ref().needs_training(),
+        }
+    }
+
+    fn tombstones(&self) -> usize {
+        match self {
+            Self::Plain(idx) => idx.tombstones(),
+            Self::Cached(cached) => cached.get_ref().tombstones(),
+        }
+    }
+
+    fn wants_compaction(&self) -> bool {
+        match self {
+            Self::Plain(idx) => idx.wants_compaction(),
+            Self::Cached(cached) => cached.get_ref().wants_compaction(),
         }
     }
 
@@ -182,8 +201,27 @@ impl IqdbCore {
     }
 
     /// `true` if a search would first need to materialize the IVF index.
+    /// Below the training threshold searches scan the store instead, so
+    /// there is nothing to materialize.
     pub(crate) fn needs_materialization(&self) -> bool {
-        self.ivf_dirty
+        self.ivf_dirty && !self.below_training_threshold()
+    }
+
+    /// `true` when this is an IVF database holding fewer rows than its
+    /// clusters can be trained on: `n_clusters`, or 256 for IVF-PQ, whose
+    /// codebooks need that many.
+    fn below_training_threshold(&self) -> bool {
+        match self.kind {
+            IndexKind::Ivf(cfg) => {
+                let min_rows = if cfg.use_pq {
+                    cfg.n_clusters.max(PQ_MIN_TRAINING_ROWS)
+                } else {
+                    cfg.n_clusters
+                };
+                self.store.len() < min_rows
+            }
+            _ => false,
+        }
     }
 
     /// `true` if `id` is currently stored.
@@ -220,7 +258,9 @@ impl IqdbCore {
     /// Materialize the IVF index from the store if a write left it stale.
     /// A no-op for the flat and HNSW kinds, and for an empty store.
     pub(crate) fn ensure_ready(&mut self) -> Result<()> {
-        if !self.ivf_dirty || self.store.is_empty() {
+        // Too few rows to train on: searches scan the store exactly until
+        // enough rows arrive, so leave the index stale rather than fail.
+        if !self.ivf_dirty || self.store.is_empty() || self.below_training_threshold() {
             return Ok(());
         }
         let mut idx = AnyIndex::new(self.kind, self.dim, self.metric)?;
@@ -240,10 +280,14 @@ impl IqdbCore {
     }
 
     /// Rebuild the approximate index from the current vectors. For IVF this
-    /// retrains centroids (and PQ codebooks); for flat / HNSW it is a no-op.
+    /// retrains centroids (and PQ codebooks); for HNSW it drops deleted
+    /// nodes from the graph; for flat it is a no-op.
     pub(crate) fn optimize(&mut self) -> Result<()> {
         if matches!(self.kind, IndexKind::Ivf(_)) {
             self.ivf_dirty = true;
+        }
+        if self.index.tombstones() > 0 {
+            self.compact_index()?;
         }
         self.ensure_ready()
     }
@@ -251,8 +295,59 @@ impl IqdbCore {
     /// Search the materialized index. The caller (the handle) must have
     /// called [`ensure_ready`](Self::ensure_ready) first when
     /// [`needs_materialization`](Self::needs_materialization) is set.
+    ///
+    /// `k` is clamped to the row count, so a huge `k` never sizes an index
+    /// buffer. An IVF database below its training threshold is searched
+    /// exactly over the store.
     pub(crate) fn search(&self, query: &[f32], params: &SearchParams) -> Result<Vec<Hit>> {
+        let clamped;
+        let params = if params.k > self.store.len() {
+            clamped = SearchParams {
+                k: self.store.len(),
+                ..params.clone()
+            };
+            &clamped
+        } else {
+            params
+        };
+        if self.ivf_dirty && self.below_training_threshold() {
+            return self.exact_scan(query, params);
+        }
         self.index.search(query, params)
+    }
+
+    /// Exact search over every stored row, for an IVF database too small
+    /// to train. The store holds fewer rows than `n_clusters` here, so
+    /// the scan is small.
+    fn exact_scan(&self, query: &[f32], params: &SearchParams) -> Result<Vec<Hit>> {
+        let mut flat = FlatIndex::new(self.dim, self.metric, FlatConfig)?;
+        for row in self.store.iter() {
+            flat.insert(row.id.clone(), Arc::clone(&row.vector), row.meta.clone())?;
+        }
+        flat.search(query, params)
+    }
+
+    /// Rebuild the HNSW graph without its deleted nodes. The index is
+    /// unwrapped from its cache layer for the rebuild and re-wrapped
+    /// after, which also clears any cached results.
+    fn compact_index(&mut self) -> Result<()> {
+        let placeholder = CacheLayer::wrap(
+            AnyIndex::new(IndexKind::Flat, self.dim, self.metric)?,
+            &None,
+        );
+        let mut idx = std::mem::replace(&mut self.index, placeholder).into_inner();
+        let result = idx.compact();
+        self.index = CacheLayer::wrap(idx, &self.cache_cfg);
+        result
+    }
+
+    /// Compact the HNSW graph once deleted nodes outnumber live ones.
+    fn maybe_compact(&mut self) -> Result<()> {
+        if self.index.wants_compaction() {
+            self.compact_index()
+        } else {
+            Ok(())
+        }
     }
 
     /// Drop a stale index entry (ignoring an absent id) before reinserting.
@@ -284,7 +379,12 @@ impl IndexCore for IqdbCore {
         if !newly {
             self.index_replace_delete(&id)?;
         }
-        self.index.insert(id, vector, metadata)
+        self.index.insert(id, vector, metadata)?;
+        if !newly {
+            // An update left a deleted HNSW node behind.
+            self.maybe_compact()?;
+        }
+        Ok(())
     }
 
     fn delete(&mut self, id: &VectorId) -> Result<()> {
@@ -295,9 +395,10 @@ impl IndexCore for IqdbCore {
             return Ok(());
         }
         match self.index.delete(id) {
-            Ok(()) | Err(IqdbError::NotFound) => Ok(()),
-            Err(other) => Err(other),
+            Ok(()) | Err(IqdbError::NotFound) => {}
+            Err(other) => return Err(other),
         }
+        self.maybe_compact()
     }
 
     fn search(&self, query: &[f32], params: &SearchParams) -> Result<Vec<Hit>> {
@@ -558,5 +659,124 @@ mod tests {
         let _ = c.search(&[1.0, 0.0], &params).unwrap();
         assert_eq!(c.cache_stats().unwrap().hits, 1);
         assert_eq!(c.len(), 1);
+    }
+
+    #[test]
+    fn snapshot_with_oversized_index_config_fails_to_load() {
+        // A snapshot whose CRC is valid but whose stored config asks for an
+        // impossible graph or cluster table must fail the load, not size
+        // allocations from those fields.
+        let mut c = core(
+            IndexKind::Hnsw(HnswConfig::default()),
+            2,
+            DistanceMetric::Euclidean,
+        );
+        c.insert(VectorId::from(1u64), v(&[1.0, 0.0]), None)
+            .unwrap();
+        c.kind = IndexKind::Hnsw(
+            HnswConfig::default()
+                .with_m(1 << 40)
+                .with_ef_construction(1 << 41),
+        );
+        let mut bytes = Vec::new();
+        c.save_to(&mut bytes).unwrap();
+        assert!(IqdbCore::load_from(&mut &bytes[..]).is_err());
+
+        c.kind = IndexKind::Ivf(IvfConfig::default().with_n_clusters(1 << 40));
+        let mut bytes = Vec::new();
+        c.save_to(&mut bytes).unwrap();
+        assert!(IqdbCore::load_from(&mut &bytes[..]).is_err());
+    }
+
+    #[test]
+    fn huge_k_is_clamped_to_the_row_count() {
+        for kind in [IndexKind::Flat, IndexKind::Hnsw(HnswConfig::default())] {
+            let mut c = core(kind, 2, DistanceMetric::Euclidean);
+            for i in 0..5u64 {
+                c.insert(VectorId::from(i), v(&[i as f32, 0.0]), None)
+                    .unwrap();
+            }
+            let hits = c
+                .search(
+                    &[0.0, 0.0],
+                    &SearchParams::new(usize::MAX / 2, DistanceMetric::Euclidean),
+                )
+                .unwrap();
+            assert_eq!(hits.len(), 5);
+        }
+    }
+
+    #[test]
+    fn small_ivf_database_is_searched_exactly() {
+        // Default config: 256 clusters, far more than the rows stored.
+        let mut c = core(
+            IndexKind::Ivf(IvfConfig::default()),
+            2,
+            DistanceMetric::Euclidean,
+        );
+        for i in 0..100u64 {
+            c.insert(VectorId::from(i), v(&[i as f32, 1.0]), None)
+                .unwrap();
+        }
+        assert!(!c.needs_materialization());
+        c.ensure_ready().unwrap();
+        let hits = c
+            .search(
+                &[10.2, 1.0],
+                &SearchParams::new(3, DistanceMetric::Euclidean),
+            )
+            .unwrap();
+        let ids: Vec<VectorId> = hits.into_iter().map(|h| h.id).collect();
+        assert_eq!(
+            ids,
+            vec![
+                VectorId::from(10u64),
+                VectorId::from(11u64),
+                VectorId::from(9u64)
+            ]
+        );
+        // Once enough rows arrive, the index trains on the next search.
+        let cfg = IvfConfig::default().with_n_clusters(4).with_n_probes(4);
+        let mut c = core(IndexKind::Ivf(cfg), 2, DistanceMetric::Euclidean);
+        for i in 0..3u64 {
+            c.insert(VectorId::from(i), v(&[i as f32, 0.0]), None)
+                .unwrap();
+        }
+        assert!(!c.needs_materialization());
+        c.insert(VectorId::from(3u64), v(&[3.0, 0.0]), None)
+            .unwrap();
+        assert!(c.needs_materialization());
+        c.ensure_ready().unwrap();
+        assert!(!c.needs_materialization());
+    }
+
+    #[test]
+    fn hnsw_updates_do_not_grow_the_graph_without_bound() {
+        let mut c = core(
+            IndexKind::Hnsw(HnswConfig::default()),
+            8,
+            DistanceMetric::Euclidean,
+        );
+        // 100 rows, each rewritten 50 times: 4,900 replaced nodes.
+        for round in 0..50u64 {
+            for i in 0..100u64 {
+                let x: Vec<f32> = (0..8).map(|j| (i * 8 + j + round) as f32).collect();
+                c.insert(VectorId::from(i), v(&x), None).unwrap();
+            }
+        }
+        assert_eq!(c.len(), 100);
+        let dead = c.index.tombstones();
+        assert!(
+            dead <= index::COMPACT_MIN_TOMBSTONES,
+            "{dead} deleted nodes still held"
+        );
+
+        // `optimize` drops whatever is left.
+        c.optimize().unwrap();
+        assert_eq!(c.index.tombstones(), 0);
+        let hits = c
+            .search(&[0.0; 8], &SearchParams::new(1, DistanceMetric::Euclidean))
+            .unwrap();
+        assert_eq!(hits[0].id, VectorId::from(0u64));
     }
 }

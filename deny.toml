@@ -75,4 +75,15 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# Temporary: the [patch.crates-io] fix branches in Cargo.toml. Remove with
+# that block once the fixes are published.
+allow-git = [
+    "https://github.com/jamesgober/iqdb-types",
+    "https://github.com/jamesgober/iqdb-distance",
+    "https://github.com/jamesgober/iqdb-filter",
+    "https://github.com/jamesgober/iqdb-flat",
+    "https://github.com/jamesgober/iqdb-hnsw",
+    "https://github.com/jamesgober/iqdb-ivf",
+    "https://github.com/jamesgober/iqdb-persist",
+    "https://github.com/jamesgober/iqdb-quantize",
+]

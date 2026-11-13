@@ -204,7 +204,7 @@ assert_eq!(docs[0].id, VectorId::from(1u64));
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `optimize` | `() -> Result<()>` | Rebuild / retrain the approximate index over the current vectors (IVF centroids). No-op for flat / HNSW. |
+| `optimize` | `() -> Result<()>` | Rebuild the approximate index over the current vectors: retrains IVF centroids, and rebuilds an HNSW graph without its deleted nodes. No-op for flat. |
 | `cache_stats` | `() -> Option<CacheStats>` | Cache hit/miss statistics, or `None` when uncached. |
 | `flush` | `() -> Result<()>` | Compact a file-backed store (fold the WAL into a fresh snapshot); no-op in memory. |
 | `close` | `(self) -> Result<()>` | Final compaction, then release the handle. |
@@ -329,7 +329,7 @@ let ivf = IvfConfig::default().with_n_clusters(64).with_n_probes(8);
 assert_eq!(ivf.n_probes, 8);
 ```
 
-IVF is trained lazily from the stored vectors on the first search; `Iqdb::optimize` retrains it. IVF-PQ (`use_pq = true`) supports only `Euclidean`, `DotProduct`, and `Manhattan`; constructing it under `Cosine` or `Hamming` fails with `Error::Index`.
+IVF is trained lazily from the stored vectors on the first search once the database holds at least `n_clusters` rows (256 for IVF-PQ); below that, searches scan every row exactly instead of failing. `Iqdb::optimize` retrains it. IVF-PQ (`use_pq = true`) supports only `Euclidean`, `DotProduct`, and `Manhattan`; constructing it under `Cosine` or `Hamming` fails with `Error::Index`.
 
 ### `CacheConfig` / `CacheStats`
 
@@ -482,7 +482,9 @@ All feature flags are additive.
 
 - **Construction-time shape.** `dim` and `metric` are fixed at open. A wrong-dimension vector is rejected at `upsert`; a reopen with a mismatched `dim` / `metric` fails with `Error::Config`.
 - **Authoritative store.** iqdb owns the vectors in an internal row store; the search index (flat / HNSW / IVF) is a derived structure rebuilt from that store on load. `len()` always reflects the authoritative store.
-- **IVF lifecycle.** IVF is trained lazily from the stored vectors on the first search after a write, and rebuilt by `Iqdb::optimize`. Flat and HNSW accept incremental inserts directly, so search-after-write is immediate for them.
+- **IVF lifecycle.** IVF is trained lazily from the stored vectors on the first search after a write, and rebuilt by `Iqdb::optimize`. Until the database holds `n_clusters` rows (256 for IVF-PQ) searches scan every row exactly. Flat and HNSW accept incremental inserts directly, so search-after-write is immediate for them.
+- **HNSW and updates.** Every update of an existing id replaces its graph node, which leaves the old node deleted but still in the graph. Once deleted nodes outnumber live rows (and number at least 1,024) the graph is rebuilt from the live rows, so memory tracks the row count rather than the number of writes. `Iqdb::optimize` rebuilds it on demand.
+- **Search size.** `k` is clamped to the number of stored rows, so a very large `k` simply returns every row.
 - **Approximate filters.** HNSW / IVF apply a metadata `Filter` after traversal; a highly selective filter can return fewer than `k` hits. The flat index applies the filter exactly before scoring. Widen HNSW `filter_widen` or IVF `n_probes` to compensate.
 - **Concurrency.** `Iqdb` is `Send + Sync`. Reads share a `RwLock` read guard; writes and the lazy IVF build take the write guard. Lock poisoning is recovered, never propagated as a panic.
 - **Durability.** The default file-backed write policy `fsync`s the WAL on every acknowledged write, so a clean process exit (or even a crash) replays to the last acknowledged state on reopen. `flush` / `close` compact the WAL into a snapshot.

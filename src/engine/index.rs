@@ -73,7 +73,49 @@ impl AnyIndex {
             Self::Flat(_) | Self::Hnsw(_) => Ok(()),
         }
     }
+
+    /// Deleted nodes an HNSW graph still holds; `0` for the other kinds,
+    /// which free a deleted row at once.
+    pub(crate) fn tombstones(&self) -> usize {
+        match self {
+            Self::Hnsw(idx) => idx.tombstones(),
+            Self::Flat(_) | Self::Ivf(_) => 0,
+        }
+    }
+
+    /// `true` once an HNSW graph holds more deleted nodes than live ones
+    /// (and at least [`COMPACT_MIN_TOMBSTONES`]). Past that point the dead
+    /// nodes cost more memory and search time than one rebuild.
+    pub(crate) fn wants_compaction(&self) -> bool {
+        match self {
+            Self::Hnsw(idx) => {
+                let dead = idx.tombstones();
+                dead >= COMPACT_MIN_TOMBSTONES && dead > idx.len()
+            }
+            Self::Flat(_) | Self::Ivf(_) => false,
+        }
+    }
+
+    /// Rebuild an HNSW graph without its deleted nodes; a no-op for the
+    /// other kinds.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`iqdb_hnsw::HnswIndex::compact`]'s error, which leaves
+    /// the graph unchanged.
+    pub(crate) fn compact(&mut self) -> Result<()> {
+        match self {
+            Self::Hnsw(idx) => idx.compact(),
+            Self::Flat(_) | Self::Ivf(_) => Ok(()),
+        }
+    }
 }
+
+/// Deleted HNSW nodes tolerated before an automatic rebuild, so a small
+/// database does not rebuild on every few updates. Every update of an
+/// existing id deletes its old node, so without a rebuild the graph would
+/// grow with the number of writes rather than the number of rows.
+pub(crate) const COMPACT_MIN_TOMBSTONES: usize = 1024;
 
 impl IndexCore for AnyIndex {
     fn insert(

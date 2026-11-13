@@ -129,3 +129,43 @@ fn garbage_file_is_not_a_database() {
     let err = Iqdb::open(&snap, 2, DistanceMetric::Cosine).unwrap_err();
     assert!(matches!(err, Error::Persist(_)), "got {err:?}");
 }
+
+#[test]
+fn writes_after_a_torn_tail_survive_a_second_crash() {
+    let tmp = TempDb::new();
+    let snap = tmp.snapshot();
+
+    {
+        let db = Iqdb::open(&snap, 2, DistanceMetric::Euclidean).unwrap();
+        db.upsert(VectorId::from(1u64), v(&[1.0, 0.0]), None)
+            .unwrap();
+        // Crash: drop without close, so the write lives only in the log.
+    }
+
+    // The crash tore a frame: three bytes of a frame head at the log end.
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(tmp.wal())
+            .unwrap();
+        f.write_all(&[0x10, 0x00, 0x00]).unwrap();
+        f.sync_all().unwrap();
+    }
+
+    {
+        let db = Iqdb::open(&snap, 2, DistanceMetric::Euclidean).unwrap();
+        assert_eq!(db.len(), 1);
+        // Acknowledged under the default fsync-always policy.
+        db.upsert(VectorId::from(2u64), v(&[0.0, 1.0]), None)
+            .unwrap();
+        db.upsert(VectorId::from(1u64), v(&[2.0, 0.0]), None)
+            .unwrap();
+        // Crash again, without close.
+    }
+
+    let db = Iqdb::open(&snap, 2, DistanceMetric::Euclidean).unwrap();
+    assert_eq!(db.len(), 2, "writes acknowledged after recovery were lost");
+    let (one, _) = db.get(&VectorId::from(1u64)).unwrap().unwrap();
+    assert_eq!(one.as_slice(), &[2.0, 0.0]);
+    assert!(db.get(&VectorId::from(2u64)).unwrap().is_some());
+}
